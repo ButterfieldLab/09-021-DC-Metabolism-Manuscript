@@ -1,0 +1,2733 @@
+---
+title: "09-021 Frcation V Analysis"
+author: "Juraj Adamik"
+date: '2022-10-03'
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+# load functions library
+```{r}
+library(easypackages)
+packages(c("dplyr", "broom",  "ggrepel","flowCore", "pheatmap","xlsx",
+           "tidyverse", "patchwork", "broom", "effsize","fst","ggplot2","gdata","rstatix","limma",
+           "doBy","reshape2","devtools","scico","readr","magrittr","uwot","readxl","ggridges",
+           "ggbeeswarm","viridis","RColorBrewer", "lme4","ComplexHeatmap","gridBase","circlize","dendextend","heatmaply","ggpubr","corrr", "survminer", "survival", "rstatix"))
+library(limma)
+library(ggrepel)
+library(umap)
+library(gridBase)
+library(circlize)
+library("survival")
+library("survminer")
+
+make_tukey_test <- function (data,variable,grouping_variable){
+  data %>%
+    tukey_hsd(reformulate(grouping_variable, variable)) %>%
+    add_y_position()
+}
+```
+
+#-----------------------------------------
+# Load prep JAFCM107
+```{r Load in Data frames and merge tables}
+# to avoid conflicts
+filter <- dplyr::filter
+summarize <-  dplyr::summarize
+
+# Set directories
+getwd()
+list.files(path="../Fraction_V_DFs/")
+
+# read in tables
+#--------------------------#
+# Load in population frequency table
+FV_107 <- read.csv("../Fraction_V_DFs/FV_JAFCM107_Analysis_V1.Statistics.csv")
+#glimpse(FV_Population)
+glimpse(FV_107)
+FV_107 %>% 
+  mutate_if(is.character,as.factor)->
+  FV_107
+glimpse(FV_107)
+# to take out unstained samples # but we don't have ones in this case
+FV_107 %>% filter(is.na(reagent))
+#FV_107 <- FV_107 %>% filter(!is.na(reagent))
+
+
+
+FV_107 <- FV_107 %>% 
+  dplyr::mutate(population = dplyr::recode(population, 
+                                           "pDC_from_pre" = "pDC",
+                                           "CD5+ cDC2s" = "CD5+cDC2s"))
+
+#FV_107 <- FV_107 %>%  filter(population != "not(t-DCs)")
+# Populations represented in the panel
+dput(as.character(unique(FV_107$population)))
+
+FV_107 %<>%  rename("Patient_Number" = "Patient")
+
+FV_107$population
+```
+
+### Set Population Colors
+```{r}
+##########################
+# Set some graphing parameters
+my_populations_cols =  c("cMo" = "#F8766D",
+             "iMo" = "#DB8E00",
+             "ncMo" = "#AEA200",
+             "pDC" = "#64B200",
+             "pre-DCs" = "#00BD5C",
+             "cDC1s" = "#FFea05",
+             "CD5+cDC2s" = "#00BADE",
+             "CD5-cDC2s" = "#00A6FF",
+             "CD14+DC3s" = "#B385FF",
+             "CD14-DC3s" = "#EF67EB")
+```
+
+# Load prep 09_021_Clinl_Final.Table_06122022.csv
+```{r}
+read.csv("../Fraction_V_DFs/09_021_Clinl_Final.Table_06122022.csv") %>% 
+    dplyr::mutate(Sequence_Number = as.factor(Sequence_Number))  ->
+  Clinical_DF
+
+Clinical_DF %<>%  rename("Patient_Number" = "Sequence_Number")
+glimpse(Clinical_DF)
+
+FV_107.Clincal <- left_join(FV_107, Clinical_DF, by  = "Patient_Number")
+FV_107.Clincal %<>%  filter(!grepl(pattern = "Unstained", filename))
+
+FV_107.Clincal %<>% dplyr::mutate_at(vars(Response:Outcome), ~ if_else(is.na(.), 'HD', .))
+FV_107.Clincal %>%  filter(grepl(pattern = "HD", Type))
+
+
+dput(as.character(unique(FV_107.Clincal$population)))
+FV_107.Clincal$population <- factor(FV_107.Clincal$population, levels = c("cMo", "iMo", "ncMo", "CD123+ DCs", "pDC", "pre-DCs", "t-DCs", "cDC1s",
+ "CD5+cDC2s","CD5-", "CD5-cDC2s", "CD14-DC3s", "CD14+DC3s"))
+getwd()
+
+# png("../Figures_Fraction_V//Pop.Frequencies_SD.png", height=10, width=12, units="in", res=600)
+FV_107.Clincal %>% group_by(Patient_Number,Outcome, Response, population) %>%  
+  summarise(mean = mean(percent,na.rm = TRUE),
+            sd = sd(percent,na.rm = TRUE)) %>% 
+  ggplot(aes(x=Patient_Number, y=mean, fill=population))+
+  geom_bar(stat="identity", color="black",size=0.25,
+           position=position_dodge()) +
+  geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width=.2,size=0.5,
+                position=position_dodge(.9))+
+  scale_fill_manual(values=c(my_populations_cols))+  
+   facet_wrap(~population , nrow = 3, scales = "free",strip.position="top")+
+ theme(
+    legend.position = "right", aspect.ratio = 1/1.25,
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(size = 13, face ="bold"),              # to label add individual box
+    strip.background =element_blank(), 
+    panel.border = element_rect(colour = "black", fill=NA, size=0.5),
+    # to color individual box
+    axis.text.x = element_text(face="bold", color="black",size=5, vjust = 0.2,angle = 90),
+    # to label x-axis tics/number labels
+    axis.text.y = element_text(face="plain", color="black",size=14),  # to label y-axis tics/number labels
+    axis.title.x= element_blank(),                                    # to label/remove x-axis labels
+    axis.title.y= element_text(face="plain", color="black",size=14),    # to label/remove y-axis labels
+    axis.ticks = element_line(colour = "black", size = 1))
+# dev.off()
+```
+
+### Set levels
+```{r}
+FV_107.Clincal$Response <- factor(FV_107.Clincal$Response, levels=c("HD","PR","SD","NED1","NED2","PD"))
+FV_107.Clincal$Outcome <- factor(FV_107.Clincal$Outcome, levels=c("HD","Good","Bad"))
+
+# grouping all samples
+Average_Frequencies <- FV_107.Clincal %>% mutate_if(is.character, as.factor) %>% 
+  group_by(Patient_Number,Outcome,Outcome.1, Response,population) %>%  
+  dplyr::summarise(across(where(is.numeric), ~ mean(.x, na.rm = TRUE))) %>%  ungroup()
+```
+
+### Set Colors
+```{r}
+cols.Response = c("magenta","red","green","lightblue","blue","grey45")
+cols.Response.assign <- setNames(cols.Response, levels(Average_Frequencies$Response))
+
+cols.Outcome = c("magenta","red","grey45")
+cols.Outcome.assign <- setNames(cols.Outcome, levels(Average_Frequencies$Outcome))
+
+cols.Outcome.1 = c("magenta","red","green","grey45")
+cols.Outcome.1.assign <- setNames(cols.Outcome.1, levels(Average_Frequencies$Outcome.1))
+```
+
+# Set Theme
+```{r}
+# Plotting Frequency vs Outcome - Plots for each population 
+#############################################
+##### set theme_indi
+theme_indi <- theme(
+  legend.position = "right", aspect.ratio = 1/1,
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  strip.text = element_text(size = 13, face ="bold"),              # to label add individual box
+  strip.background =element_blank(), 
+  # panel.border = element_rect(colour = "black", fill=NA, size=0.5),
+  # to color individual box
+  axis.text.x = element_text(face="bold", color="black",size=10, vjust = 0.2,angle = 90),
+  # to label x-axis tics/number labels
+  axis.text.y = element_text(face="plain", color="black",size=12),  # to label y-axis tics/number labels
+  axis.title.x= element_blank(),                                    # to label/remove x-axis labels
+  axis.title.y= element_text(face="plain", color="black",size=12),    # to label/remove y-axis labels
+  axis.ticks = element_line(colour = "black", size = 1))
+```
+
+# Set jitter
+```{r}
+jitter_2 <- position_jitter(width = 0.25, height = 0)
+jitter_1 <- position_jitter(width = 0.1, height = 0)
+jitter_0 <- position_jitter(width = 0, height = 0)
+```
+#-----------------------------------------
+# FREQUENCY Plots
+# Monocyte populations
+```{r}
+# cMo
+###
+# Tukey HSD from ANOVA results
+cMo_stat <-   Average_Frequencies %>% 
+    filter(population == "cMo") %>% 
+    aov(percent ~ Outcome, data = .) %>% tukey_hsd()
+
+png("../Figures_Fraction_V/Frequencies/Frequencies_cMo.png", 
+    height=3, width=3, units="in", res=600)
+Average_Frequencies %>%   
+  filter(population == "cMo") %>% 
+  ggplot(aes(x = Outcome, y =  percent)) + 
+  geom_jitter(position = jitter_2 ,aes(fill= Response), shape=21,color="black", size = 2, alpha = 0.85) +
+  geom_boxplot(aes(group=Outcome),size = 0.2, color= "black",alpha=0.2, outlier.colour = NA)+
+  scale_fill_manual(values=c("magenta","red","green","lightblue","blue","grey45"))+  
+  stat_pvalue_manual(cMo_stat,
+                     label = "p.adj",
+                     size=3,
+                     y.position = c(100,103,106), #step.increase = 0.1,
+                     tip.length = 0.0, vjust = 0.01)+
+  theme_classic()+ 
+  ylab("Frequency (cMo)")+
+  ylim(80,110)+
+  theme_indi
+dev.off()
+
+# to calculate stats
+iMo_stat <-  Average_Frequencies %>% 
+    filter(population == "iMo") %>% 
+    aov(percent ~ Outcome, data = .) %>% tukey_hsd()
+
+png("../Figures_Fraction_V/Frequencies/Frequencies_iMo.png", 
+    height=3, width=3, units="in", res=600)
+Average_Frequencies %>%   
+  filter(population == "iMo") %>% 
+  #filter(Patient != "Pt17") %>% 
+  ggplot(aes(x = Outcome, y =  percent)) + 
+  geom_point(position=jitter_2, aes(fill= Response), shape=21,color="black", size = 2, alpha = 0.85) + #library(ggbeeswarm)
+  geom_boxplot(aes(group=Outcome),size = 0.2, color= "black",alpha=0.2,outlier.colour = NA)+
+  scale_fill_manual(values=c("magenta","red","green","lightblue","blue","grey45"))+  
+  stat_pvalue_manual(iMo_stat,
+                     label = "p.adj",
+                     size=3,
+                     y.position = c(12,14,16), #step.increase = 0.1,
+                     tip.length = 0.0, vjust = 0.01)+
+  theme_classic()+ 
+  ylab("Frequency (iMo)")+
+  ylim(0,18)+
+  theme_indi
+dev.off()
+###
+# ncMo
+###
+# to calculate stats
+ncMo_stat <- Average_Frequencies %>% 
+    filter(population == "ncMo") %>% 
+    aov(percent ~ Outcome, data = .) %>% tukey_hsd()
+
+png("../Figures_Fraction_V/Frequencies/Frequencies_ncMo.png", 
+    height=3, width=3, units="in", res=600)
+Average_Frequencies %>%   
+  filter(population == "ncMo") %>% 
+  ggplot(aes(x = Outcome, y =  percent)) + 
+  geom_point(position=jitter_2 ,aes(fill= Response), shape=21,color="black", size = 2, alpha = 0.85) + #library(ggbeeswarm)
+  geom_boxplot(aes(group=Outcome),size = 0.2, color= "black",alpha=0.2,outlier.colour = NA)+
+  scale_fill_manual(values=c("magenta","red","green","lightblue","blue","grey45"))+  
+  stat_pvalue_manual(ncMo_stat,
+                     label = "p.adj",
+                     size=3,
+                     y.position = c(9,11,13), #step.increase = 0.1,
+                     tip.length = 0.0, vjust = 0.01)+
+  theme_classic()+ 
+  ylab("Frequency (ncMo)")+
+  ylim(0,16)+
+  theme_indi
+dev.off()
+```
+# pDC populations
+```{r}
+# to calculate stats without outliar
+CD123_DCs_stat <- Average_Frequencies %>% 
+    filter(population == "CD123+ DCs") %>% 
+    aov(percent ~ Outcome, data = .) %>% tukey_hsd()
+
+png("../Figures_Fraction_V/Frequencies/Frequencies_CD123.png", 
+    height=3, width=3, units="in", res=600)
+Average_Frequencies %>%   
+  filter(population == "CD123+ DCs") %>% 
+  ggplot(aes(x = Outcome, y =  percent)) + 
+  geom_point(position = jitter_2,aes(fill= Response), shape=21,color="black", size = 2, alpha = 0.85) + 
+  geom_boxplot(aes(group=Outcome),size = 0.2, color= "black",alpha=0.2,outlier.colour = NA)+
+  scale_fill_manual(values=c("magenta","red","green","lightblue","blue","grey45"))+  
+  stat_pvalue_manual(CD123_DCs_stat,
+                     label = "p.adj",
+                     size=3,
+                     y.position = c(35,40,45), #step.increase = 0.1,
+                     tip.length = 0.0, vjust = 0.01)+
+  theme_classic()+ 
+  ylab("Frequency (CD123+ DCs)")+
+  ylim(0,50)+
+  theme_indi
+dev.off()
+
+pDC_stat <- Average_Frequencies %>% 
+    filter(population == "pDC") %>% 
+    aov(percent ~ Outcome, data = .) %>% tukey_hsd()
+
+png("../Figures_Fraction_V/Frequencies/Frequencies_pDC.png", 
+    height=3, width=3, units="in", res=600)
+Average_Frequencies %>%   
+  filter(population == "pDC") %>% 
+  ggplot(aes(x = Outcome, y =  percent)) + 
+  geom_point(position = jitter_2,aes(fill= Response), shape=21,color="black", size = 2, alpha = 0.85) + 
+  geom_boxplot(aes(group=Outcome),size = 0.2, color= "black",alpha=0.2,outlier.colour = NA)+
+  scale_fill_manual(values=c("magenta","red","green","lightblue","blue","grey45"))+  
+  stat_pvalue_manual(pDC_stat,
+                     label = "p.adj",
+                     size=3,
+                     y.position = c(100,105,110), #step.increase = 0.1,
+                     tip.length = 0.0, vjust = 0.01)+
+  theme_classic()+ 
+  ylab("Frequency (pDC)")+
+  ylim(70,115)+
+  theme_indi
+dev.off()
+###
+# preDC
+###
+# to calculate stats without outliar
+preDC_stat <- Average_Frequencies %>% 
+    filter(population == "pre-DCs") %>% 
+    aov(percent ~ Outcome, data = .) %>% tukey_hsd()
+
+png("../Figures_Fraction_V/Frequencies/Frequencies_preDCs.png", 
+    height=3, width=3, units="in", res=600)
+Average_Frequencies %>%   
+  filter(population == "pre-DCs") %>% 
+  ggplot(aes(x = Outcome, y =  percent)) + 
+  geom_point(position = jitter_2,aes(fill= Response), shape=21,color="black", size = 2, alpha = 0.85) + 
+  geom_boxplot(aes(group=Outcome),size = 0.2, color= "black",alpha=0.2,outlier.colour = NA)+
+  scale_fill_manual(values=c("magenta","red","green","lightblue","blue","grey45"))+  
+  stat_pvalue_manual(preDC_stat,
+                     label = "p.adj",
+                     size=3,
+                     y.position = c(22,26,30), #step.increase = 0.1,
+                     tip.length = 0.0, vjust = 0.01)+
+  theme_classic()+ 
+  ylab("Frequency (pre-DCs)")+
+  ylim(0,35)+
+  theme_indi
+dev.off()
+
+
+t_DCs_stat <- Average_Frequencies %>% 
+    filter(population == "t-DCs") %>% 
+    aov(percent ~ Outcome, data = .) %>% tukey_hsd()
+
+png("../Figures_Fraction_V/Frequencies/Frequencies_tDC.png", 
+    height=3, width=3, units="in", res=600)
+Average_Frequencies %>%   
+  filter(population == "t-DCs") %>% 
+  ggplot(aes(x = Outcome, y =  percent)) + 
+  geom_point(position = jitter_2,aes(fill= Response), shape=21,color="black", size = 2, alpha = 0.85) + 
+  geom_boxplot(aes(group=Outcome),size = 0.2, color= "black",alpha=0.2,outlier.colour = NA)+
+  scale_fill_manual(values=c("magenta","red","green","lightblue","blue","grey45"))+  
+  stat_pvalue_manual(preDC_stat,
+                     label = "p.adj",
+                     size=3,
+                     y.position = c(20,24,28), #step.increase = 0.1,
+                     tip.length = 0.0, vjust = 0.01)+
+  theme_classic()+ 
+  ylab("Frequency (t-DCs)")+
+  ylim(0,30)+
+  theme_indi
+dev.off()
+```
+# DC1 populations
+```{r}
+cDC1s_stat <- Average_Frequencies %>% 
+    filter(population == "cDC1s") %>% 
+    aov(percent ~ Outcome, data = .) %>% tukey_hsd()
+
+png("../Figures_Fraction_V/Frequencies/DC1s/Frequencies_cDC1s.png", 
+    height=3, width=3, units="in", res=600)
+Average_Frequencies %>%   
+  filter(population == "cDC1s") %>% 
+  ggplot(aes(x = Outcome, y =  percent)) + 
+  geom_point(position=jitter_2,aes(fill= Response), shape=21,color="black", size = 2, alpha = 0.85) + #library(ggbeeswarm)
+  geom_boxplot(aes(group=Outcome),size = 0.2, color= "black",alpha=0.2,outlier.colour = NA)+
+  scale_fill_manual(values=c("magenta","red","green","lightblue","blue","grey45"))+  
+  stat_pvalue_manual(cDC1s_stat,
+                     label = "p.adj",
+                     size=3,
+                     y.position = c(8,9,10), #step.increase = 0.1,
+                     tip.length = 0.0, vjust = 0.01)+
+  theme_classic()+ 
+  ylab("Frequency (cDC1s)")+
+  ylim(0,11)+
+  theme_indi
+dev.off()
+#-------------------------------------------
+CD5.cDC2s_stat <- Average_Frequencies %>% 
+    filter(population == "CD5+cDC2s") %>% 
+    aov(percent ~ Outcome, data = .) %>% tukey_hsd()
+
+png("../Figures_Fraction_V/Frequencies/DC1s/Frequencies_CD5+_cDC2s.png", 
+    height=3, width=3, units="in", res=600)
+Average_Frequencies %>%   
+  filter(population == "CD5+cDC2s") %>% 
+  ggplot(aes(x = Outcome, y =  percent)) + 
+  geom_point(position=jitter_2,aes(fill= Response), shape=21,color="black", size = 2, alpha = 0.85) + #library(ggbeeswarm)
+  geom_boxplot(aes(group=Outcome),size = 0.2, color= "black",alpha=0.2,outlier.colour = NA)+
+  scale_fill_manual(values=c("magenta","red","green","lightblue","blue","grey45"))+  
+  stat_pvalue_manual(CD5.cDC2s_stat,
+                     label = "p.adj",
+                     size=3,
+                     y.position = c(30,34,38), #step.increase = 0.1,
+                     tip.length = 0.0, vjust = 0.01)+
+  theme_classic()+ 
+  ylab("Frequency (CD5+ cDC2s)")+
+  ylim(5,42)+
+  theme_indi
+dev.off()
+#-------------------------------------------
+cDC2s_CD5_stat <- Average_Frequencies %>% 
+    filter(population == "CD5-cDC2s") %>% 
+    aov(percent ~ Outcome, data = .) %>% tukey_hsd()
+
+Average_Frequencies$population
+png("../Figures_Fraction_V/Frequencies/DC1s/Frequencies_CD5-_cDC2s.png", 
+    height=3, width=3, units="in", res=600)
+Average_Frequencies %>%   
+  filter(population == "CD5-cDC2s") %>% 
+  ggplot(aes(x = Outcome, y =  percent)) + 
+  geom_point(position=jitter_2,aes(fill= Response), shape=21,color="black", size = 2, alpha = 0.85) + #library(ggbeeswarm)
+  geom_boxplot(aes(group=Outcome),size = 0.2, color= "black",alpha=0.2,outlier.colour = NA)+
+  scale_fill_manual(values=c("magenta","red","green","lightblue","blue","grey45"))+  
+  stat_pvalue_manual(cDC2s_CD5_stat,
+                     label = "p.adj",
+                     size=3,
+                     y.position = c(73,80,87), #step.increase = 0.1,
+                     tip.length = 0.0, vjust = 0.01)+
+  theme_classic()+ 
+  ylab("Frequency (CD5- cDC2s)")+
+  ylim(15,90)+
+  theme_indi
+dev.off()
+
+#-------------------------------------------
+CD14_DC3s_stat <- Average_Frequencies %>% 
+    filter(population == "CD14-DC3s") %>% 
+    aov(percent ~ Outcome, data = .) %>% tukey_hsd()
+
+png("../Figures_Fraction_V/Frequencies/DC1s/Frequencies_CD14-DC3s.png", 
+    height=3, width=3, units="in", res=600)
+Average_Frequencies %>%   
+  filter(population == "CD14-DC3s") %>% 
+  ggplot(aes(x = Outcome, y =  percent)) + 
+  geom_point(position=jitter_2,aes(fill= Response), shape=21,color="black", size = 2, alpha = 0.85) + #library(ggbeeswarm)
+  geom_boxplot(aes(group=Outcome),size = 0.2, color= "black",alpha=0.2,outlier.colour = NA)+
+  scale_fill_manual(values=c("magenta","red","green","lightblue","blue","grey45"))+  
+  stat_pvalue_manual(CD14_DC3s_stat,
+                     label = "p.adj",
+                     size=3,
+                     y.position = c(20,23,26), #step.increase = 0.1,
+                     tip.length = 0.0, vjust = 0.01)+
+  theme_classic()+ 
+  ylab("Frequency (CD14- DC3s)")+
+   ylim(0,30)+
+  theme_indi
+dev.off()
+
+
+CD14.DC3s_stat <- Average_Frequencies %>% 
+    filter(population == "CD14+DC3s") %>% 
+    aov(percent ~ Outcome, data = .) %>% tukey_hsd()
+
+png("../Figures_Fraction_V/Frequencies/DC1s/Frequencies_CD14+DC3s.png", 
+    height=3, width=3, units="in", res=600)
+Average_Frequencies %>%   
+  filter(population == "CD14+DC3s") %>% 
+  ggplot(aes(x = Outcome, y =  percent)) + 
+  geom_point(position=jitter_2,aes(fill= Response), shape=21,color="black", size = 2, alpha = 0.85) + #library(ggbeeswarm)
+  geom_boxplot(aes(group=Outcome),size = 0.2, color= "black",alpha=0.2,outlier.colour = NA)+
+  scale_fill_manual(values=c("magenta","red","green","lightblue","blue","grey45"))+  
+  stat_pvalue_manual(CD14.DC3s_stat,
+                     label = "p.adj",
+                     size=3,
+                     y.position = c(50,57,65), #step.increase = 0.1,
+                     tip.length = 0.0, vjust = 0.01)+
+  theme_classic()+ 
+  ylab("Frequency (CD14+ DC3s)")+
+  ylim(12,70)+
+  theme_indi
+dev.off()
+```
+
+#-----------------------------------------
+# Sumarizing Marker expression
+```{r}
+FV_107.Clincal.Select <- FV_107.Clincal %>%  ungroup() %>% select(population,Patient_Number,Sample, Type, reagent,median:stddev,Patient_CPL_Code:PFS_ind) %>% filter(!population %in% c("CD123+ DCs","CD5-","t-DCs"))
+
+FV_107.Clincal.Select.wide <- FV_107.Clincal.Select  %>%  pivot_wider(names_from = reagent, values_from = median) %>% 
+  group_by(Outcome,Outcome.1,Patient_Number,population) %>% 
+  summarise(across(c(CD88_89:CD45), ~max(.x, na.rm = TRUE)))   %>%  ungroup()
+
+FV_107.Clincal.Select.wide$population <- droplevels(FV_107.Clincal.Select.wide$population)
+
+FV_107.Final <- FV_107.Clincal.Select.wide %>%  filter(Patient_Number !="HD1.2") %>%  mutate(Patient_Number = recode(Patient_Number,
+                                                     "HD1.1" = "HD1")) 
+
+FV_107.Final$Patient_Population <- paste(FV_107.Final$Patient_Number, FV_107.Final$population, sep = "_")
+```
+#=============================
+Before running next section, LOAD JAFCM108 Script
+# NEXT SECTION
+
+#-----------------------------------------
+# Heatmap of myeloid marker population 
+#*** FCM_09021_Final Starting DF
+```{r Heatmap_1}
+# For heatmap I am using Metabolic filtered table, which has filtered metabolic parameters which are
+# trully out of range (Specifically pertaining to Pt 24 and 6) 
+library(dendextend)
+
+MFI_Metabolic_Clin_Heat <- FCM_09021_Final.Metabolic 
+
+glimpse(MFI_Metabolic_Clin_Heat)
+colnames_Markers <- MFI_Metabolic_Clin_Heat %>% select(CD88_89:CD301) %>% colnames() %>% as.vector()
+dput(as.character(colnames_Markers))
+
+# All_Markers <- c("CD88_89", "CD86", "pAMPK", "pmTOR", "CD11c", "ILT3", "CD3", 
+# "CD56", "CD16", "ICOSLG", "CD206", "HLA-DR", "CD14", "CD45RA", 
+# "CD5", "CD141", "CD19", "CD169_AXL", "CD1c", "FcerG", "CD163", 
+# "CD303", "CD123", "CD45", "CD36", "CADM1", "PD-L1", "CD301")
+
+# Here we use cluster myeolid markers for heatmap generation 
+Cluster_Markers <- c("CD88_89", "CD86",  "CD11c", "CD301", "ILT3", 
+ "CD16", "ICOSLG", "CD206", "HLA-DR", "CD14", "CD45RA", 
+"CD5", "CD141",  "CD169_AXL", "CD1c", "FcerG", "CD163", 
+"CD303", "PD-L1", "CD123", "CD36")
+
+FCM_09021_Final.Metabolic %>% distinct(Patient_Number) %>% dim()
+
+HEAT_IMM <- MFI_Metabolic_Clin_Heat %>% select(all_of(Cluster_Markers))
+
+HEAT_IMM_matrix <- heatmaply::normalize(HEAT_IMM) %>% as.matrix()
+row.names(HEAT_IMM_matrix) <- MFI_Metabolic_Clin_Heat$population
+
+##### 
+# Anootations 
+Outcome = HeatmapAnnotation(Outcome = MFI_Metabolic_Clin_Heat$Outcome.1,
+                            col = list(Outcome = c("HD" = "magenta", 
+                                                     "Good" = "red", 
+                                                     "Stable" = "green",
+                                                     "Bad" = "grey45")),
+                            gp = gpar(col = NA),
+                            simple_anno_size = unit(0.5, "cm"),
+                            show_annotation_name = T,
+                            annotation_name_gp= gpar(fontsize = 16))
+
+
+Population = HeatmapAnnotation(population = MFI_Metabolic_Clin_Heat$population,
+                                col = list(population = c("cMo" = "#F8766D",
+             "iMo" = "#DB8E00",
+             "ncMo" = "#AEA200",
+             "pDC" = "#64B200",
+             "pre-DCs" = "#00BD5C",
+             "cDC1s" = "#FFea05",
+             "CD5+cDC2s" = "#00BADE",
+             "CD5-cDC2s" = "#00A6FF",
+             "CD14+DC3s" = "#B385FF",
+             "CD14-DC3s" = "#EF67EB")),
+                               gp = gpar(col = NA),
+                               simple_anno_size = unit(0.5, "cm"),
+                               show_annotation_name = T,
+             annotation_name_gp= gpar(fontsize = 16))
+
+# If I want to add metabolic parameters
+MFI_Metabolic_Clin_Heat
+Mito_Dep <- c(MFI_Metabolic_Clin_Heat$Mito_Dep)
+Gluc_Dep <- c(MFI_Metabolic_Clin_Heat$Glucose_Dep)
+Glycolytic_Capacity <- c(MFI_Metabolic_Clin_Heat$Glyco_Cap)
+FAAO <- c(MFI_Metabolic_Clin_Heat$FAAO)
+FAO_Dep <- c(MFI_Metabolic_Clin_Heat$FAO_Dep.1)
+Glnlysis_Dep <- c(MFI_Metabolic_Clin_Heat$Glnlysis_Dep.1)
+
+Together = HeatmapAnnotation(
+  'Glucose Dependence' = anno_barplot((Gluc_Dep),ylim = c(0, 90),
+                                      bar_width = 0.9,
+                                      height = unit(1.45, "cm"),axis = TRUE,
+                                      gp=gpar(border =NA,fill="black",lty="blank")),
+  'Mitochondrial Dependence' = anno_barplot((Mito_Dep),ylim = c(0, 120),
+                                            bar_width = 0.9,
+                                            height = unit(1.45, "cm"),axis = TRUE,
+                                            gp=gpar(border =NA,fill="blue",lty="blank")),
+  'Glycolytic Capacity' = anno_barplot((Glycolytic_Capacity),ylim = c(0, 140),
+                                       bar_width = 0.9,
+                                       height = unit(1.45, "cm"),axis = TRUE,
+                                       gp=gpar(border =NA,fill="red",lty="blank")),
+  'FAAO' = anno_barplot((FAAO),ylim = c(0, 140),
+                        bar_width = 0.9,
+                        height = unit(1.45, "cm"),axis = TRUE,
+                        gp=gpar(border =NA,fill="purple",lty="blank")),
+  'FAO Dependence' = anno_barplot((FAO_Dep),ylim = c(-50, 100),
+                        bar_width = 0.9,
+                        height = unit(1.45, "cm"),axis = TRUE,
+                        gp=gpar(border =NA,fill="dodgerblue",lty="blank")),
+  'Glnlysis Dependence' = anno_barplot((Glnlysis_Dep),ylim = c(-10, 100),
+                        bar_width = 0.9,
+                        height = unit(1.45, "cm"),axis = TRUE,
+                        gp=gpar(border =NA,fill="magenta",lty="blank")),
+  gap = unit(c(1.2,1.2,1.2,1.2,1.2), "mm"), annotation_name_gp= gpar(fontsize = 16))
+
+
+Metabolic_Param_Combo <- c(Together,  gap = unit(c(0.5), "mm"))
+################################################
+# I am transposing the heatmap to have column = samples and rows = Markers
+
+
+T_HEAT_IMM_matrix <- t(HEAT_IMM_matrix)
+dend = hclust(dist(T_HEAT_IMM_matrix))
+dend = color_branches(dend, k = 6)
+
+png("../Figures_Fraction_V/HEATMAP/Heatmap_1.png", 
+     height=13.5, width=15, units="in", res=600)
+Heatmap(T_HEAT_IMM_matrix, name = "MFI (median)", clustering_distance_rows = function(x, y) 1 - cor(x, y),
+        row_names_gp = gpar(fontsize = 16),
+        show_column_names = F,
+        column_split = 6,
+        row_split = 10,
+        border = TRUE,
+        row_gap = unit(0.5, "mm"),
+        column_gap = unit(1.5, "mm"),
+        viridis(10, begin = 0, end = 1, option = "viridis"),
+        #col = rev(brewer.pal(n = 11, name = "Spectral")),
+        #col = wes_palette("Moonrise1"),
+        #col = rev(rainbow(7)),
+        #col = col_fun,
+        rect_gp = gpar(col = NA, lwd = 1),
+        column_title = "Immuno-metabolic profiling",
+        height = unit(120, "mm"),
+        width = unit(160, "mm"),
+        cluster_rows = dend,
+        bottom_annotation = c(Metabolic_Param_Combo),
+        top_annotation= c(Population,Outcome),
+        row_title = "Myeloid Immune Markers",
+        row_title_gp = gpar(fontfamily = "sans", fontsize = 16),
+        #left_annotation = CATEGORIES,
+        column_title_gp = gpar(fontfamily = "sans", fontsize = 16))
+ dev.off()
+```
+
+# Color Assigning
+```{r}
+cols.R = c("magenta","red","green","lightblue","blue","grey45")
+cols.R.assign <- setNames(cols.R, levels(FCM_09021_Final.Metabolic$Response))
+
+cols.O = c("magenta","red","grey45")
+cols.O.assign <- setNames(cols.O, levels(FCM_09021_Final.Metabolic$Outcome))
+
+cols.O1 = c("magenta","red", "green", "grey45")
+cols.O1.assign <- setNames(cols.O1, levels(FCM_09021_Final.Metabolic$Outcome.1))
+
+```
+# Define Metabolic_Param
+```{r}
+Metabolic_Param <- FCM_09021_Final.Metabolic %>% select(Glucose_Dep:FAAO,FAO_Dep.1,Glnlysis_Dep.1) %>% colnames()
+```
+
+### PCA Immune Markers Analysis
+```{r}
+library(ggfortify)
+library(gridExtra)
+
+glimpse(FCM_09021_Final.Metabolic)
+
+MFI_Metabolic_Clin_Heat <- FCM_09021_Final.Metabolic 
+
+glimpse(MFI_Metabolic_Clin_Heat)
+colnames_Markers <- MFI_Metabolic_Clin_Heat %>% select(CD88_89:CD301) %>% colnames() %>% as.vector()
+dput(as.character(colnames_Markers))
+
+# All_Markers <- c("CD88_89", "CD86", "pAMPK", "pmTOR", "CD11c", "ILT3", "CD3", 
+# "CD56", "CD16", "ICOSLG", "CD206", "HLA-DR", "CD14", "CD45RA", 
+# "CD5", "CD141", "CD19", "CD169_AXL", "CD1c", "FcerG", "CD163", 
+# "CD303", "CD123", "CD45", "CD36", "CADM1", "PD-L1", "CD301")
+
+# Here we use cluster myeolid markers for heatmap generation 
+Cluster_Markers <- c("CD88_89", "CD86",  "CD11c", "CD301", "ILT3", 
+ "CD16", "ICOSLG", "CD206", "HLA-DR", "CD14", "CD45RA", 
+"CD5", "CD141",  "CD169_AXL", "CD1c", "FcerG", "CD163", 
+"CD303", "PD-L1", "CD123", "CD36")
+
+MFI_Metabolic_Clin_Heat$Patient_Population
+data <- MFI_Metabolic_Clin_Heat
+
+d <- MFI_Metabolic_Clin_Heat %>% select(Patient_Population,all_of(Cluster_Markers))
+
+d %<>%  column_to_rownames(var = "Patient_Population")
+td <- t(heatmaply::normalize(d))
+PC <-prcomp(na.omit(td), center = TRUE, scale = TRUE)
+PC <- data.frame(PC$rotation)
+# Assign Variables
+PC$Response <- data$Response
+PC$Outcome <- data$Outcome
+PC$Outcome.1 <- data$Outcome.1
+PC$population <- data$population
+
+PC$Glucose_Dep <- data$Glucose_Dep
+PC$Mito_Dep <- data$Mito_Dep
+PC$Glyco_Cap <- data$Glyco_Cap
+PC$FAO_Dep.1 <- data$FAO_Dep.1
+PC$Glnlysis_Dep.1 <- data$Glnlysis_Dep.1
+
+ggplot(PC,aes(x=PC1,y=PC2,col=Response))+
+   geom_point(size=3,alpha=0.5)+ #Size and alpha just for fun
+   scale_color_manual(values = c(cols.R.assign))+ #your colors here
+   theme_classic()
+# solution you are looking for is to "distill" them
+ggplot(PC,aes(x=PC1,y=PC2,col=population))+
+   geom_point(size=3,alpha=0.5)+ 
+   #scale_color_distiller(palette= c("PiYG"))+
+   scale_color_manual(values = c(my_populations_cols))+ #your colors here
+
+   theme_classic()
+# Theme Set Up
+########
+Theme.PCA <-  theme(legend.position="left", aspect.ratio = 1/1.25,
+          plot.title = element_text(size = 15, face = "bold"),
+        panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  strip.text = element_text(size = 11, face ="bold"),
+  axis.text.y = element_text(face="plain", color="black",size=14),  # to label y-axis tics/number labels
+        axis.text.x = element_text(face="plain", color="black",size=14), 
+          axis.title.x = element_text(face="plain", color="black",size=14),
+        axis.title.y = element_text(face="plain", color="black",size=14),     
+  strip.background =element_blank())
+
+########
+A <- ggplot(PC,aes(x=PC1,y=PC2,col=Response))+
+   geom_point(size=2,alpha=0.5)+ #Size and alpha just for fun
+   scale_color_manual(values = c(cols.R.assign))+ 
+   theme_bw() + Theme.PCA
+
+
+B <- ggplot(PC,aes(x=PC1,y=PC2,col=Outcome.1))+
+   geom_point(size=2,alpha=0.5)+ #Size and alpha just for fun
+   scale_color_manual(values = c(cols.O1.assign))+ 
+   theme_bw() + Theme.PCA
+
+C <- ggplot(PC,aes(x=PC1,y=PC2,col=population))+
+   geom_point(size=2,alpha=0.5)+ #Size and alpha just for fun
+   scale_color_manual(values = c(my_populations_cols))+ 
+   theme_bw() + Theme.PCA
+
+A.1 <- ggplot(PC,aes(x=PC1,y=PC2,col=Glucose_Dep))+
+   geom_point(size=2,alpha=0.5)+ #Size and alpha just for fun
+   scale_color_viridis(option = "viridis")+ 
+   theme_bw() + Theme.PCA
+
+A.2 <- ggplot(PC,aes(x=PC1,y=PC2,col=Mito_Dep))+
+   geom_point(size=2,alpha=0.5)+ #Size and alpha just for fun
+   scale_color_viridis(option = "viridis")+ 
+   theme_bw() + Theme.PCA
+
+
+A.3 <- ggplot(PC,aes(x=PC1,y=PC2,col=Glnlysis_Dep.1))+
+   geom_point(size=2,alpha=0.5)+ #Size and alpha just for fun
+   scale_color_viridis(option = "viridis")+ 
+   theme_bw() + Theme.PCA
+
+png("../Figures_Fraction_V/PCA/PCA.1.pop.png", 
+    height=13, width=15, units="in", res=600)
+grid.arrange(C, B,A,  nrow=1, top=textGrob("PCA- based on Immune Markers"))
+dev.off()
+
+png("../Figures_Fraction_V/PCA/PCA.2.pop.png", 
+    height=13, width=15, units="in", res=600)
+grid.arrange(A.1,A.2,A.3,  nrow=1, top=textGrob("PCA- based on Immune Markers"))
+dev.off()
+```
+
+# COX OS Ratios
+```{r COX HR OS Models}
+FCM_09021_Log <- FCM_09021_Final.Metabolic
+
+FCM_09021_Log_Tidy <- FCM_09021_Log  %>%
+  dplyr::mutate_at(vars(Puromycin:CD301, all_of(Metabolic_Param)), list(~heatmaply::normalize(.,))) %>% 
+  gather(key = "Marker", value = "Value",Puromycin:Glnlysis_Dep.1)
+
+# OS
+FCM_09021_Log_Tidy$Marker %>%  unique()
+tidy_Immune_nest <- FCM_09021_Log_Tidy %>%  filter(Response != "HD") %>% 
+  group_by(Marker,population) %>% 
+  nest() 
+
+Model_Im <- tidy_Immune_nest %>% 
+  mutate(model = map(data, ~ coxph(Surv(Overal_Survival, death_ind) ~ Value, data = .x)))
+
+Modelunnest_Im <- Model_Im %>% 
+  mutate(coef = map(model, ~tidy(.x,conf.int = TRUE))) %>% 
+  unnest(coef)
+
+Modelunnest_Im.Sel <- Modelunnest_Im %>% select(population,Marker,term:conf.high) %>% 
+  mutate(sig_value=round(p.value,3))
+dput(as.character(Modelunnest_Im.Sel %>%  filter(sig_value < 0.05) %>%  pull(Marker)))
+
+Modelunnest_Im.Sel$population <- factor(Modelunnest_Im.Sel$population, levels=c("cMo","iMo","ncMo","pDC","pre-DCs","cDC1s","CD5+cDC2s",
+                                                                                               "CD5-cDC2s","CD14-DC3s","CD14+DC3s"))
+  
+png("../Figures_Fraction_V/COX_Modeling/COX_OS_Continous.png", 
+    height=2.7, width=8, units="in", res=600)
+Modelunnest_Im.Sel %>% filter(p.value <= 0.065) %>% filter(Marker %in% c( "CD11c", "ILT3","CD141")) %>% 
+ggplot(aes(x= estimate , y= fct_rev(population) , xmin=conf.low, xmax=conf.high, label =sig_value)) +
+  geom_text(nudge_x = 5,nudge_y = 0.4, size=3) +
+  geom_pointrange()+ # Makes range for ggplot values based on the data and AES specified in first line
+  geom_hline(yintercept=0, lty=2, size =1) +  # add a dotted line at x=0 after flip
+  geom_errorbar(aes(xmin=conf.low, xmax=conf.high), width=0, cex=0.7)+ # Makes whiskers on the range (more aesthetically pleasing)
+  #coord_flip() + # flip coordinates (puts labels on y axis)
+  geom_point(shape = 10, size = 2) + # specifies the size and shape of the geompoint
+  geom_vline(xintercept = 1, color = "red", linetype = "dashed", cex = 1, alpha = 0.5) +
+  ggtitle("Immune marker association with Continous OS")+ # Blank Title for the Graph
+  xlab("Hazard Ratio (95% CI)") + 
+  ylab("Populations") + 
+    scale_y_discrete(expand = expansion(mult = c(0.1, 0.1)))+
+  facet_wrap(~Marker, ncol=3, scales = "free_x")+ # Makes DV header (Can handle multiple DVs)
+  #scale_x_continuous(limits = c(-20,20), breaks = c(-10,-5,0,5,10)) # limits and tic marks on X axis (flipped specification do to coord_flip)
+  theme(aspect.ratio = 1/0.7,
+        line = element_line(colour = "black", size = 2), # My personal theme for GGplots
+            strip.text = element_text(size = 12, face ="bold"),              # to label add individual box
+        strip.background = element_rect(fill=NA), 
+        legend.position ="none", 
+        axis.line.x = element_line(colour = "black"), 
+        axis.line.y = element_blank(), 
+        panel.border= element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        panel.background = element_blank(),
+        axis.text.y = element_text(face="plain", color="black",size=10),  # to label y-axis tics/number labels
+        axis.title.x = element_text(face="plain", color="black",size=10, angle = 0,vjust = 0),
+        axis.title.y = element_text(face="plain", color="black",size=12,vjust = 0),                                    # to label/remove y-axis labels
+        axis.ticks = element_blank())
+dev.off()
+
+#########################################
+# PFS
+Model_Im.PFS <- tidy_Immune_nest %>% 
+  mutate(model = map(data, ~ coxph(Surv(PF_Survival, PFS_ind) ~ Value, data = .x)))
+
+Modelunnest_Im.PFS <- Model_Im.PFS %>% 
+  mutate(coef = map(model, ~tidy(.x,conf.int = TRUE))) %>% 
+  unnest(coef)
+
+Modelunnest_Im.Sel.PFS <- Modelunnest_Im.PFS %>% select(population,Marker,term:conf.high) %>% 
+  mutate(sig_value=round(p.value,3))
+dput(as.character(Modelunnest_Im.Sel.PFS %>%  filter(sig_value < 0.05) %>%  pull(Marker) %>% unique()))
+
+Modelunnest_Im.Sel.PFS$population <- factor(Modelunnest_Im.Sel.PFS$population, levels=c("cMo","iMo","ncMo","pDC","pre-DCs","cDC1s","CD5+cDC2s",
+                                                                                               "CD5-cDC2s","CD14-DC3s","CD14+DC3s"))
+  
+png("../Figures_Fraction_V/COX_Modeling/COX_PFS_Continous.png", 
+    height=2.7, width=3.5, units="in", res=600)
+Modelunnest_Im.Sel.PFS %>% 
+  filter(Marker %in% c( "PD-L1")) %>% filter(population %in% c("CD5-cDC2s","CD14+DC3s")) %>% 
+ggplot(aes(x= estimate , y= population , xmin=conf.low, xmax=conf.high, label =sig_value)) +
+  geom_text(nudge_x = 5,nudge_y = 0.05, size=3) +
+  geom_pointrange()+ # Makes range for ggplot values based on the data and AES specified in first line
+  geom_hline(yintercept=0, lty=2, size =1) +  # add a dotted line at x=0 after flip
+  geom_errorbar(aes(xmin=conf.low, xmax=conf.high), width=0, cex=0.7)+ # Makes whiskers on the range (more aesthetically pleasing)
+  #coord_flip() + # flip coordinates (puts labels on y axis)
+  geom_point(shape = 10, size = 2) + # specifies the size and shape of the geompoint
+  geom_vline(xintercept = 1, color = "red", linetype = "dashed", cex = 1, alpha = 0.5) +
+  ggtitle("Immune marker association with Continous PFS")+ # Blank Title for the Graph
+  xlab("Hazard Ratio (95% CI)") + 
+  ylab("Populations") + 
+    scale_y_discrete(expand = expansion(mult = c(0.1, 0.1)))+
+  facet_wrap(~Marker,  scales = "free_x")+ # Makes DV header (Can handle multiple DVs)
+  #scale_x_continuous(limits = c(-20,20), breaks = c(-10,-5,0,5,10)) # limits and tic marks on X axis (flipped specification do to coord_flip)
+  theme(aspect.ratio = 1/0.7,
+        line = element_line(colour = "black", size = 2), # My personal theme for GGplots
+            strip.text = element_text(size = 12, face ="bold"),              # to label add individual box
+        strip.background = element_rect(fill=NA), 
+        legend.position ="none", 
+        axis.line.x = element_line(colour = "black"), 
+        axis.line.y = element_blank(), 
+        panel.border= element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        panel.background = element_blank(),
+        axis.text.y = element_text(face="plain", color="black",size=10),  # to label y-axis tics/number labels
+        axis.title.x = element_text(face="plain", color="black",size=10, angle = 0,vjust = 0),
+        axis.title.y = element_text(face="plain", color="black",size=12,vjust = 0),                                    # to label/remove y-axis labels
+        axis.ticks = element_blank())
+dev.off()
+```
+# ----------------------------
+### 1.Linear Regression SCENITH
+3 outcome groups (HD, Good, Bad)
+```{r}
+glimpse(FCM_09021_Log_Tidy)
+FCM_09021_Log_Tidy.model <- FCM_09021_Log_Tidy %>%  
+  mutate(Outcome.1_Rank = case_when(
+  Outcome %in% c("HD") ~ 3,
+  Outcome %in% c("Good") ~ 2,
+  Outcome %in% c("Bad") ~ 1
+))
+FCM_09021_Log_Tidy.model$Value
+
+Pre.lm_full <- FCM_09021_Log_Tidy.model %>% 
+  group_by(Marker,population) %>% 
+  nest() %>%  
+  #filter(Cell.Type != "CD8:Treg Ratio") %>% 
+	mutate(
+		lm_out_full = map(data, ~lm(Outcome.1_Rank ~ Value, data=.x %>% filter(!is.na(Outcome.1_Rank)) %>% mutate(Outcome.1_Rank=as.numeric(Outcome.1_Rank)))),
+		pval_full = map_dbl(lm_out_full, ~.x %>% broom::tidy() %>% filter(term=="Value") %>% pull(p.value)),
+	)
+
+Pre.lm_full %>% select(-data, -lm_out_full) %>% arrange(pval_full)
+
+Plot_Outcome.1 <- Pre.lm_full %>% mutate(tidied = map(lm_out_full,conf.int = TRUE, tidy)) %>% 
+  unnest(tidied) %>% select(-data, -lm_out_full) %>% filter(term == "Value") %>%  mutate_if(is.character,as.factor) %>% arrange(pval_full) 
+
+Plot_Outcome.1 %<>% mutate(sig_value=round(p.value,5))
+
+
+png("../Figures_Fraction_V/COX_Modeling/Forest_LR_Outcome(3cat)_Imm.png",
+     height=3, width=12, units="in", res=600)
+Plot_Outcome.1  %>% filter(p.value < 0.05) %>% filter(Marker %in% c("PD-L1", "CD141", "CD36","CD86")) %>% 
+  ggplot(aes(x= estimate , y= fct_reorder(Marker,-sig_value), xmin=conf.low, xmax=conf.high, label = sig_value)) +
+  geom_text(nudge_x = -10, nudge_y = 0.4, size=3,color = "black") +
+  geom_pointrange()+ # Makes range for ggplot values based on the data and AES specified in first line
+  geom_errorbar(aes(xmin=conf.low, xmax=conf.high), width=0, cex=0.7)+ # Makes whiskers on the range (more aesthetically pleasing)
+  #coord_flip() + # flip coordinates (puts labels on y axis)
+  geom_point(shape = 10, size = 2.5) + # specifies the size and shape of the geompoint
+  geom_vline(xintercept = 0, color = "red", linetype = "dashed", cex = 1, alpha = 0.5) +
+    scale_y_discrete(expand = expansion(mult = c(0.1, 0.2)))+
+  ggtitle("SCENITH Immune (3 binary) Outcome Linear Regression")+ # Blank Title for the Graph
+  xlab(" (95% CI)") + 
+  ylab("SCENITH Parameter") +
+  facet_wrap(~population, nrow = 1)+
+   theme(aspect.ratio = 1/1,
+        plot.title = element_text(size = 14, face = "bold"),
+        line = element_line(colour = "black", size = 2), # My personal theme for GGplots
+        strip.background = element_rect(fill=NA), 
+        legend.position ="none", 
+        axis.line.x = element_line(colour = "black"), 
+        axis.line.y = element_blank(), 
+        panel.border= element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        panel.background = element_blank(),
+        axis.text.y = element_text(face="plain", color="black",size=10),  # to label y-axis tics/number labels
+        axis.text.x = element_text(face="plain", color="black",size=10),  # to label y-axis tics/number labels
+        axis.title.x = element_text(face="plain", color="black",size=12, angle = 0,vjust = 0),
+        axis.title.y = element_text(face="plain", color="black",size=14,vjust = 0),                                 
+        axis.ticks = element_blank())
+dev.off() 
+
+png("../Figures_Fraction_V/COX_Modeling/Forest_LR_Outcome(3cat)_Metab.png",
+     height=3, width=12, units="in", res=600)
+Plot_Outcome.1  %>% filter(p.value < 0.05) %>% filter(Marker %in% c(Metabolic_Param)) %>% 
+  ggplot(aes(x= estimate , y= fct_reorder(Marker,-sig_value), xmin=conf.low, xmax=conf.high, label = sig_value)) +
+  geom_text(nudge_x = 0.0, nudge_y = 0.4, size=3,color = "black") +
+  geom_pointrange()+ # Makes range for ggplot values based on the data and AES specified in first line
+  geom_errorbar(aes(xmin=conf.low, xmax=conf.high), width=0, cex=0.7)+ # Makes whiskers on the range (more aesthetically pleasing)
+  #coord_flip() + # flip coordinates (puts labels on y axis)
+  geom_point(shape = 10, size = 2.5) + # specifies the size and shape of the geompoint
+  geom_vline(xintercept = 0, color = "red", linetype = "dashed", cex = 1, alpha = 0.5) +
+    scale_y_discrete(expand = expansion(mult = c(0.1, 0.2)))+
+  ggtitle("SCENITH Metabolic (3 binary) Outcome Linear Regression")+ # Blank Title for the Graph
+  xlab(" (95% CI)") + 
+  ylab("SCENITH Parameter") +
+  facet_wrap(~population, nrow = 1)+
+   theme(aspect.ratio = 1/1,
+        plot.title = element_text(size = 14, face = "bold"),
+        line = element_line(colour = "black", size = 2), # My personal theme for GGplots
+        strip.background = element_rect(fill=NA), 
+        legend.position ="none", 
+        axis.line.x = element_line(colour = "black"), 
+        axis.line.y = element_blank(), 
+        panel.border= element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        panel.background = element_blank(),
+        axis.text.y = element_text(face="plain", color="black",size=10),  # to label y-axis tics/number labels
+        axis.text.x = element_text(face="plain", color="black",size=10),  # to label y-axis tics/number labels
+        axis.title.x = element_text(face="plain", color="black",size=12, angle = 0,vjust = 0),
+        axis.title.y = element_text(face="plain", color="black",size=14,vjust = 0),                                 
+        axis.ticks = element_blank())
+dev.off() 
+```
+
+### 2.Linear Regression SCENITH
+2 outcome groups (Good, Bad) # basically a t-test
+```{r}
+FCM_09021_Log_Tidy.model1 <- FCM_09021_Log_Tidy %>%  filter(Response != "HD") %>% 
+  mutate(Outcome.1_Rank = case_when(
+  Outcome %in% c("Good") ~ 2,
+  Outcome %in% c("Bad") ~ 1
+))
+FCM_09021_Log_Tidy.model1$Value
+
+Pre.lm_full <- FCM_09021_Log_Tidy.model1 %>% 
+    group_by(Marker,population) %>% 
+  nest() %>%  
+	mutate(
+		lm_out_full = map(data, ~lm(Outcome.1_Rank ~ Value, data=.x %>% filter(!is.na(Outcome.1_Rank)) %>% mutate(Outcome.1_Rank=as.numeric(Outcome.1_Rank)))),
+		pval_full = map_dbl(lm_out_full, ~.x %>% broom::tidy() %>% filter(term=="Value") %>% pull(p.value)),
+	)
+
+Pre.lm_full %>% select(-data, -lm_out_full) %>% arrange(pval_full)
+
+Plot_Outcome.1 <- Pre.lm_full %>% mutate(tidied = map(lm_out_full,conf.int = TRUE, tidy)) %>% 
+  unnest(tidied) %>% select(-data, -lm_out_full) %>% filter(term == "Value") %>%  mutate_if(is.character,as.factor) %>% arrange(pval_full) 
+
+Plot_Outcome.1 %<>% mutate(sig_value=round(p.value,5))
+
+
+
+png("../Figures_Fraction_V/COX_Modeling/Forest_LR_Outcome(2categ)_Imm.png", 
+     height=3, width=12, units="in", res=600)
+
+Plot_Outcome.1  %>% filter(p.value < 0.05) %>% filter(Marker %in% c("PD-L1","ILT3","CD206")) %>% 
+  ggplot(aes(x= estimate , y= fct_reorder(Marker,-sig_value), xmin=conf.low, xmax=conf.high, label = sig_value)) +
+  geom_text(nudge_x = -1, nudge_y = 0.1, size=3,color = "black") +
+  geom_pointrange()+ # Makes range for ggplot values based on the data and AES specified in first line
+  geom_errorbar(aes(xmin=conf.low, xmax=conf.high), width=0, cex=0.7)+ # Makes whiskers on the range (more aesthetically pleasing)
+  #coord_flip() + # flip coordinates (puts labels on y axis)
+  geom_point(shape = 10, size = 2.5) + # specifies the size and shape of the geompoint
+  geom_vline(xintercept = 0, color = "red", linetype = "dashed", cex = 1, alpha = 0.5) +
+    scale_y_discrete(expand = expansion(mult = c(0.1, 0.2)))+
+  ggtitle("SCENITH Immune (2 binary) Outcome Linear Regression")+ # Blank Title for the Graph
+  xlab(" (95% CI)") + 
+  ylab("SCENITH Parameter") +
+  facet_wrap(~population, nrow = 1)+
+   theme(aspect.ratio = 1/0.5,
+        plot.title = element_text(size = 14, face = "bold"),
+        line = element_line(colour = "black", size = 2), # My personal theme for GGplots
+        strip.background = element_rect(fill=NA), 
+        legend.position ="none", 
+        axis.line.x = element_line(colour = "black"), 
+        axis.line.y = element_blank(), 
+        panel.border= element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        panel.background = element_blank(),
+        axis.text.y = element_text(face="plain", color="black",size=10),  # to label y-axis tics/number labels
+        axis.text.x = element_text(face="plain", color="black",size=10),  # to label y-axis tics/number labels
+        axis.title.x = element_text(face="plain", color="black",size=12, angle = 0,vjust = 0),
+        axis.title.y = element_text(face="plain", color="black",size=14,vjust = 0),                                 
+        axis.ticks = element_blank())
+dev.off() 
+
+png("../Figures_Fraction_V/COX_Modeling/Forest_LR_Outcome(2categ)_Metab.png", 
+     height=3, width=12, units="in", res=600)
+Plot_Outcome.1  %>% filter(p.value < 0.05) %>% filter(Marker %in% c(Metabolic_Param)) %>% 
+  ggplot(aes(x= estimate , y= fct_reorder(Marker,-sig_value), xmin=conf.low, xmax=conf.high, label = sig_value)) +
+  geom_text(nudge_x = 0.0, nudge_y = 0.1, size=3,color = "black") +
+  geom_pointrange()+ # Makes range for ggplot values based on the data and AES specified in first line
+  geom_errorbar(aes(xmin=conf.low, xmax=conf.high), width=0, cex=0.7)+ # Makes whiskers on the range (more aesthetically pleasing)
+  #coord_flip() + # flip coordinates (puts labels on y axis)
+  geom_point(shape = 10, size = 2.5) + # specifies the size and shape of the geompoint
+  geom_vline(xintercept = 0, color = "red", linetype = "dashed", cex = 1, alpha = 0.5) +
+    scale_y_discrete(expand = expansion(mult = c(0.1, 0.2)))+
+  ggtitle("SCENITH Metabolic (2 binary) Outcome Linear Regression")+ # Blank Title for the Graph
+  xlab(" (95% CI)") + 
+  ylab("SCENITH Parameter") +
+  facet_wrap(~population, nrow = 1)+
+   theme(aspect.ratio = 1/0.5,
+        plot.title = element_text(size = 14, face = "bold"),
+        line = element_line(colour = "black", size = 2), # My personal theme for GGplots
+        strip.background = element_rect(fill=NA), 
+        legend.position ="none", 
+        axis.line.x = element_line(colour = "black"), 
+        axis.line.y = element_blank(), 
+        panel.border= element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        panel.background = element_blank(),
+        axis.text.y = element_text(face="plain", color="black",size=10),  # to label y-axis tics/number labels
+        axis.text.x = element_text(face="plain", color="black",size=10),  # to label y-axis tics/number labels
+        axis.title.x = element_text(face="plain", color="black",size=12, angle = 0,vjust = 0),
+        axis.title.y = element_text(face="plain", color="black",size=14,vjust = 0),                                 
+        axis.ticks = element_blank())
+dev.off() 
+```
+
+
+
+
+
+# FCM_09021_Final_Tidy
+```{r}
+FCM_09021_Final_Tidy <- FCM_09021_Final.Metabolic %>% select(-c(`2DG`:Z,FAO_Dep,Glnlysis_Dep)) %>% dplyr::mutate_at(vars(Puromycin:CD301), list(~heatmaply::normalize(.,))) %>% 
+  gather(key = "Marker", value = "Value",Puromycin:Glnlysis_Dep.1,)
+```
+
+### theme_JA
+```{r}
+theme_JA <- theme(
+  legend.position = "right", aspect.ratio = 1/1,
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  strip.text = element_text(size = 8, face ="bold"),              # to label add individual box
+  strip.background =element_blank(), 
+  axis.line.x = element_blank(), 
+  axis.line.y = element_line(colour = "black", size = 0.5),
+  axis.text.x = element_text(face="bold", color="black",size=10, vjust = 0.2,angle = 90),
+  axis.text.y = element_text(face="plain", color="black",size=12),  # to label y-axis tics/number labels
+  axis.title.x= element_blank(),                                    # to label/remove x-axis labels
+  axis.title.y= element_text(face="plain", color="black",size=12),    # to label/remove y-axis labels
+  axis.ticks = element_line(colour = "black", size = 1))
+
+theme_JA <- theme(
+  legend.position = "right", aspect.ratio = 1/1,
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  strip.text = element_blank(),             # to label add individual box
+  strip.background =element_blank(), 
+  axis.line.x = element_blank(), 
+  axis.line.y = element_line(colour = "black", size = 0.5),
+  axis.text.x =  element_blank(),
+  axis.text.y = element_text(face="plain", color="black",size=10),  # to label y-axis tics/number labels
+  axis.title.x= element_blank(),                                    # to label/remove x-axis labels
+  axis.title.y= element_text(face="plain", color="black",size=10),    # to label/remove y-axis labels
+  axis.ticks = element_line(colour = "black", size = 1))
+```
+
+
+
+# --------------------------
+# 1. BOX Outcome
+```{r}
+################################
+#for multiple comparisons Tuckey Post-hoc test
+glimpse(FCM_09021_Final_Tidy)
+make_tukey_test <- function (data,variable,grouping_variable){
+  data %>%
+    tukey_hsd(reformulate(grouping_variable, variable)) %>%
+    add_y_position()
+}
+
+Metabolic_A <- FCM_09021_Final_Tidy %>%   filter(Marker %in% c(Metabolic_Param))  
+
+Metabolic_A %<>%  mutate(Marker = recode(Marker,
+                                        "Glucose_Dep" = "Glucose Dep", 
+                                          "Mito_Dep" = "Mitochondrial Dep", 
+                                          "Glyco_Cap" = "Glycolytic Capacity", 
+                                          "FAAO" = "FAAO", 
+                                          "FAO_Dep.1" = "FAO Dep",
+                                          "Glnlysis_Dep.1" = "Glnlysis Dep"))
+
+Metabolic_A$Marker <- factor(Metabolic_A$Marker, levels=c("Glucose Dep","Mitochondrial Dep","Glycolytic Capacity","FAAO",
+                                                  "FAO Dep","Glnlysis Dep"))
+```
+
+# ========= ##################
+# ADDITION
+Calculate Statistics
+```{r}
+Metabolic.test.HD <- Metabolic_A %>% 
+  group_by(Marker, population) %>%
+  t_test(Value ~ Outcome, ref.group = "HD") %>% add_y_position()
+
+# %>% filter(population %in% c("cMo", "iMo", "ncMo")) 
+
+Metabolic_A_filtered <- Metabolic_A %>% filter(!Marker %in% c("Glycolytic Capacity", "FAAO")) %>% mutate(Marker = fct_drop(Marker))  %>% ungroup()
+
+
+
+
+Metabolic.Anova.Res <- make_tukey_test(Metabolic_A_filtered %>%  
+  group_by(Marker,population) ,variable = "Value", grouping_variable = "Outcome") %>% ungroup()
+Metabolic.Anova.Res %>% filter(p.adj < 0.09)
+
+# Tukey HSD from ANOVA results
+cMo_stat <-   Average_Frequencies %>% 
+    filter(population == "cMo") %>% 
+    aov(percent ~ Outcome, data = .) %>% tukey_hsd()
+```
+
+1.A) BOX Plots Metabolism Outcome
+```{r}
+# Tukey HSD from ANOVA results
+png("../Figures_Fraction_V/BOX/Outcome_BOX.MET.Monocyte.png", 
+    height=8, width=8, units="in", res=600)
+
+Metabolic_A_filtered %>% filter(population %in% c("cMo", "iMo", "ncMo")) %>% dplyr::filter(!Marker %in% c("Glycolytic Capacity", "FAAO")) %>% 
+  ggplot(aes(x = Outcome, y =  Value)) + 
+  geom_quasirandom(method = "quasirandom",aes(fill= Response), shape=21,color="black", size = 2, alpha = 0.65) + 
+  geom_boxplot(aes(group=Outcome),outlier.color = NA, size = 0.2, color= "black",alpha=0.2)+
+  scale_fill_manual(values=c("magenta","red","green","lightblue","blue","grey45"))+  
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.15))) +
+     stat_pvalue_manual(Metabolic.Anova.Res %>% filter(!Marker %in% c("Glycolytic Capacity", "FAAO")) %>% 
+                        filter(population %in% c("cMo", "iMo", "ncMo")),
+                       label = "p.adj", tip.length = 0,
+                     vjust = 0.01,
+                     size=3,
+                     hide.ns = FALSE)+ 
+  facet_wrap(~population~Marker, scales = "free", ncol = 4
+                ) +
+  theme_minimal()+ 
+  xlab("Outcome")+ theme_JA  #theme(strip.text = element_text(size = 13, face ="bold"))
+
+dev.off()
+
+png("../Figures_Fraction_V/BOX/Outcome_BOX.MET.pDC.png", 
+    height=8, width=8, units="in", res=600)
+
+Metabolic_A %>% filter(population %in% c("pDC", "pre-DCs")) %>% 
+  dplyr::filter(!Marker %in% c("Glycolytic Capacity", "FAAO")) %>% 
+  ggplot(aes(x = Outcome, y =  Value)) + 
+  geom_quasirandom(method = "quasirandom",aes(fill= Response), shape=21,color="black", size = 2, alpha = 0.65) + 
+  geom_boxplot(aes(group=Outcome),outlier.color = NA, size = 0.2, color= "black",alpha=0.2)+
+  scale_fill_manual(values=c("magenta","red","green","lightblue","blue","grey45"))+  
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.15)))+
+     stat_pvalue_manual(Metabolic.Anova.Res %>% dplyr::filter(!Marker %in% c("Glycolytic Capacity", "FAAO")) %>% 
+                        filter(population %in% c("pDC", "pre-DCs")),
+                       label = "p.adj", tip.length = 0,
+                     vjust = 0.01,
+                     size=3,
+                     hide.ns = FALSE)+ 
+  facet_wrap(~population~Marker, scales = "free", ncol = 4)+
+  theme_minimal()+ 
+  xlab("Outcome") + theme_JA #+theme(strip.text = element_text(size = 13, face ="bold"))
+dev.off()
+
+png("../Figures_Fraction_V/BOX/Outcome_BOX.MET.cDC1_A.png", 
+    height=8, width=8, units="in", res=600)
+
+Metabolic_A %>% filter(population %in% c("cDC1s", "CD5+cDC2s", "CD5-cDC2s")) %>% 
+  dplyr::filter(!Marker %in% c("Glycolytic Capacity", "FAAO")) %>% 
+  ggplot(aes(x = Outcome, y =  Value)) + 
+  geom_quasirandom(method = "quasirandom",aes(fill= Response), shape=21,color="black", size = 2, alpha = 0.65) + 
+  geom_boxplot(aes(group=Outcome),outlier.color = NA, size = 0.2, color= "black",alpha=0.2)+
+  scale_fill_manual(values=c("magenta","red","green","lightblue","blue","grey45"))+  
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.15)))+
+     stat_pvalue_manual(Metabolic.Anova.Res %>% dplyr::filter(!Marker %in% c("Glycolytic Capacity", "FAAO")) %>% 
+                        filter(population %in% c("cDC1s", "CD5+cDC2s", "CD5-cDC2s")),
+                       label = "p.adj", tip.length = 0,
+                     vjust = 0.01,
+                     size=3,
+                     hide.ns = FALSE)+ 
+  facet_wrap(~population~Marker, scales = "free", ncol = 4)+
+  theme_minimal()+ 
+  xlab("Outcome") +theme_JA #+ theme(strip.text = element_text(size = 13, face ="bold"))
+
+dev.off()
+
+png("../Figures_Fraction_V/BOX/Outcome_BOX.MET.cDC1_B.png", 
+    height=8, width=8, units="in", res=600)
+
+Metabolic_A %>% filter(population %in% c("CD5-cDC2s","CD14-DC3s", "CD14+DC3s")) %>% 
+  dplyr::filter(!Marker %in% c("Glycolytic Capacity", "FAAO")) %>% 
+  ggplot(aes(x = Outcome, y =  Value)) + 
+  geom_quasirandom(method = "quasirandom",aes(fill= Response), shape=21,color="black", size = 2, alpha = 0.65) + 
+  geom_boxplot(aes(group=Outcome),outlier.color = NA, size = 0.2, color= "black",alpha=0.2)+
+  scale_fill_manual(values=c("magenta","red","green","lightblue","blue","grey45"))+  
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.15)))+
+     stat_pvalue_manual(Metabolic.Anova.Res %>% dplyr::filter(!Marker %in% c("Glycolytic Capacity", "FAAO")) %>% 
+                        filter(population %in% c("CD5-cDC2s","CD14-DC3s", "CD14+DC3s")),
+                       label = "p.adj", tip.length = 0,
+                     vjust = 0.01,
+                     size=3,
+                     hide.ns = FALSE)+ 
+  facet_wrap(~population~Marker, scales = "free", ncol = 4)+
+  theme_minimal()+ 
+  xlab("Outcome") +theme_JA + theme(strip.text = element_text(size = 13, face ="bold"))
+dev.off()
+```
+
+
+
+1.B) BOX Plots Metabolism Outcome.1
+```{r}
+################################
+png("../Figures_Fraction_V/BOX/BOX.MET.Monocyte.png", 
+    height=8, width=10, units="in", res=600)
+
+Metabolic_A %>% filter(population %in% c("cMo", "iMo", "ncMo")) %>% 
+  ggplot(aes(x = Outcome.1, y =  Value)) + 
+  geom_quasirandom(method = "quasirandom",aes(fill= Response), shape=21,color="black", size = 2, alpha = 0.65) + 
+  geom_boxplot(aes(group=Outcome.1),outlier.color = NA, size = 0.2, color= "black",alpha=0.2)+
+  scale_fill_manual(values=c("magenta","red","green","lightblue","blue","grey45"))+  
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.15)))+
+     stat_pvalue_manual(Metabolic.test.HD %>% 
+                        filter(population %in% c("cMo", "iMo", "ncMo")),
+                       label = "p.adj", tip.length = 0,
+                     vjust = 0.01,
+                     size=3,
+                     hide.ns = FALSE)+ 
+  facet_wrap(~population~Marker, scales = "free", ncol = 6
+                ) +
+  theme_minimal()+ 
+  xlab("Outcome")+theme_JA
+dev.off()
+
+png("../Figures_Fraction_V/BOX/BOX.MET.pDC.png", 
+    height=8, width=10, units="in", res=600)
+
+Metabolic_A %>% filter(population %in% c("pDC", "pre-DCs")) %>% 
+  ggplot(aes(x = Outcome.1, y =  Value)) + 
+  geom_quasirandom(method = "quasirandom",aes(fill= Response), shape=21,color="black", size = 2, alpha = 0.65) + 
+  geom_boxplot(aes(group=Outcome.1),outlier.color = NA, size = 0.2, color= "black",alpha=0.2)+
+  scale_fill_manual(values=c("magenta","red","green","lightblue","blue","grey45"))+  
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.15)))+
+     stat_pvalue_manual(Metabolic.test.HD %>% 
+                        filter(population %in% c("pDC", "pre-DCs")),
+                       label = "p.adj", tip.length = 0,
+                     vjust = 0.01,
+                     size=3,
+                     hide.ns = FALSE)+ 
+  facet_wrap(~population~Marker, scales = "free", ncol = 6)+
+  theme_minimal()+ 
+  xlab("Outcome")+theme_JA
+dev.off()
+
+png("../Figures_Fraction_V/BOX/BOX.MET.cDC1_A.png", 
+    height=8, width=10, units="in", res=600)
+
+Metabolic_A %>% filter(population %in% c("cDC1s", "CD5+cDC2s", "CD5-cDC2s")) %>% 
+  ggplot(aes(x = Outcome.1, y =  Value)) + 
+  geom_quasirandom(method = "quasirandom",aes(fill= Response), shape=21,color="black", size = 2, alpha = 0.65) + 
+  geom_boxplot(aes(group=Outcome.1),outlier.color = NA, size = 0.2, color= "black",alpha=0.2)+
+  scale_fill_manual(values=c("magenta","red","green","lightblue","blue","grey45"))+  
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.15)))+
+     stat_pvalue_manual(Metabolic.test.HD %>% 
+                        filter(population %in% c("cDC1s", "CD5+cDC2s", "CD5-cDC2s")),
+                       label = "p.adj", tip.length = 0,
+                     vjust = 0.01,
+                     size=3,
+                     hide.ns = FALSE)+ 
+  facet_wrap(~population~Marker, scales = "free", ncol = 6)+
+  theme_minimal()+ 
+  xlab("Outcome")+theme_JA
+
+dev.off()
+
+png("../Figures_Fraction_V/BOX/BOX.MET.cDC1_B.png", 
+    height=8, width=10, units="in", res=600)
+
+Metabolic_A %>% filter(population %in% c("CD5-cDC2s","CD14-DC3s", "CD14+DC3s")) %>% 
+  ggplot(aes(x = Outcome.1, y =  Value)) + 
+  geom_quasirandom(method = "quasirandom",aes(fill= Response), shape=21,color="black", size = 2, alpha = 0.65) + 
+  geom_boxplot(aes(group=Outcome.1),outlier.color = NA, size = 0.2, color= "black",alpha=0.2)+
+  scale_fill_manual(values=c("magenta","red","green","lightblue","blue","grey45"))+  
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.15)))+
+     stat_pvalue_manual(Metabolic.test.HD %>% 
+                        filter(population %in% c("CD5-cDC2s","CD14-DC3s", "CD14+DC3s")),
+                       label = "p.adj", tip.length = 0,
+                     vjust = 0.01,
+                     size=3,
+                     hide.ns = FALSE)+ 
+  facet_wrap(~population~Marker, scales = "free", ncol = 6)+
+  theme_minimal()+ 
+  xlab("Outcome")+theme_JA +theme(strip.text = element_text(face="plain", color="black",size=10)) 
+dev.off()
+```
+
+```{r}
+Immune_A <- FCM_09021_Final_Tidy %>%   filter(Marker %in% c(Cluster_Markers))  
+
+```
+
+# BOX Plots Binary Immune system
+```{r}
+Immune.test.HD <- Immune_A %>% filter(Marker %in% c("CD141")) %>% 
+  group_by(Marker, population) %>%
+  t_test(Value ~ Outcome.1, ref.group = "HD") %>% add_y_position()
+
+png("../Figures_Fraction_V/BOX/BOX.MET.Monocyte.png", 
+    height=8, width=10, units="in", res=600)
+glimpse(Immune_A)
+Immune_A %>% filter(Marker %in% c("CD141")) %>% 
+  ggplot(aes(x = Outcome.1, y =  Value)) + 
+  geom_quasirandom(method = "quasirandom",aes(fill= Response), shape=21,color="black", size = 2, alpha = 0.65) + 
+  geom_boxplot(aes(group=Outcome.1),outlier.color = NA, size = 0.2, color= "black",alpha=0.2)+
+  scale_fill_manual(values=c("magenta","red","green","lightblue","blue","grey45"))+  
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.15)))+
+     stat_pvalue_manual(Immune.test.HD,
+                       label = "p.adj", tip.length = 0,
+                     vjust = 0.01,
+                     size=3,
+                     hide.ns = FALSE)+ 
+  facet_wrap(~population, scales = "free", ncol = 6
+                ) +
+  theme_minimal()+ 
+  xlab("Outcome")+theme_JA
+
+
+AAA_t_test <- Immune_A %>% filter(Response != "HD") %>%  filter(Marker %in% c("ILT3")) %>% 
+  group_by(Marker,population) %>%   #filter(!IM_Markers %in% c(Imm_Wilcoxon_markeres)) %>% 
+  t_test(Value ~ Outcome) %>% add_y_position()
+
+png("../Figures_Fraction_V/BOX/BOX.MET.Binary_ILT3.png", 
+    height=8, width=10, units="in", res=600)
+Immune_A %>% filter(Response != "HD") %>% 
+  filter(Marker %in% c("ILT3")) %>% 
+  ggplot(aes(x = Outcome, y =  Value)) + 
+  geom_quasirandom(method = "quasirandom",aes(fill= Response), shape=21,color="black", size = 2, alpha = 0.65) + 
+  geom_boxplot(aes(group=Outcome),outlier.color = NA, size = 0.2, color= "black",alpha=0.2)+
+  scale_fill_manual(values=c(cols.Response.assign))+  
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.15)))+
+ stat_pvalue_manual(AAA_t_test %>% filter(Marker %in% c("ILT3")), label = "p", tip.length = 0,
+                     vjust = 0.01,
+                     size=3,
+                     hide.ns = FALSE)+
+  facet_wrap(~population, scales = "free", ncol = 6
+                ) +
+  theme_minimal()+ 
+  xlab("Outcome") +theme(
+  legend.position = "right", aspect.ratio = 1/1,
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  strip.text = element_text(face="bold", color="black",size=10),             # to label add individual box
+  strip.background =element_blank(), 
+  axis.line.x = element_blank(), 
+  axis.line.y = element_line(colour = "black", size = 0.5),
+  axis.text.x =  element_blank(),
+  axis.text.y = element_text(face="plain", color="black",size=10),  # to label y-axis tics/number labels
+  axis.title.x= element_blank(),                                    # to label/remove x-axis labels
+  axis.title.y= element_text(face="plain", color="black",size=10),    # to label/remove y-axis labels
+  axis.ticks = element_line(colour = "black", size = 1))
+dev.off()
+
+AAA_t_test <- Immune_A %>% filter(Response != "HD") %>%  filter(Marker %in% c("CD206")) %>% 
+  group_by(Marker,population) %>%   #filter(!IM_Markers %in% c(Imm_Wilcoxon_markeres)) %>% 
+  t_test(Value ~ Outcome) %>% add_y_position()
+
+png("../Figures_Fraction_V/BOX/BOX.MET.Binary_CD206.png", 
+    height=8, width=10, units="in", res=600)
+Immune_A %>% filter(Response != "HD") %>% 
+  filter(Marker %in% c("CD206")) %>% 
+  ggplot(aes(x = Outcome, y =  Value)) + 
+  geom_quasirandom(method = "quasirandom",aes(fill= Response), shape=21,color="black", size = 2, alpha = 0.65) + 
+  geom_boxplot(aes(group=Outcome),outlier.color = NA, size = 0.2, color= "black",alpha=0.2)+
+  scale_fill_manual(values=c(cols.Response.assign))+  
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.15)))+
+ stat_pvalue_manual(AAA_t_test %>% filter(Marker %in% c("CD206")), label = "p", tip.length = 0,
+                     vjust = 0.01,
+                     size=3,
+                     hide.ns = FALSE)+
+  facet_wrap(~population, scales = "free", ncol = 6
+                ) +
+  theme_minimal()+ 
+  xlab("Outcome") +theme(
+  legend.position = "right", aspect.ratio = 1/1,
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  strip.text = element_text(face="bold", color="black",size=10),             # to label add individual box
+  strip.background =element_blank(), 
+  axis.line.x = element_blank(), 
+  axis.line.y = element_line(colour = "black", size = 0.5),
+  axis.text.x =  element_blank(),
+  axis.text.y = element_text(face="plain", color="black",size=10),  # to label y-axis tics/number labels
+  axis.title.x= element_blank(),                                    # to label/remove x-axis labels
+  axis.title.y= element_text(face="plain", color="black",size=10),    # to label/remove y-axis labels
+  axis.ticks = element_line(colour = "black", size = 1))
+dev.off()
+```
+
+
+
+
+
+#=============================
+# OLIGO tSNE
+
+CellEngine exported algorythm analysis TSV tables are loded in R and subsequently processed/tidied
+for downstream tSNE / histogram visualization analyses
+Including Puromycin log-transformed table
+and Puromycin quadrant generation
+```{r Main tSNE Data Graphs}
+marker_info <- read_csv("../Fraction_V_DFs/OLIGO/Panel_Info_107.csv")
+marker_info
+#####
+# Define Channels of Interest
+marker_info %>%
+  filter(Usage == "Use") %>%
+  pull(marker) %>%
+  as.character() ->
+  Usable_Markers
+
+marker_info %>%
+  filter(Mark_Category == "Immune") %>%
+  pull(marker) %>%
+  as.character() ->
+  Immune_Markers
+
+
+marker_info %>%
+  filter(Mark_Category == "Metabolic") %>%
+  pull(marker) %>%
+  as.character() ->
+  Metabolic_Markers
+```
+# --------------------------------
+# Single Cell table processing code
+```{Main tSNE Data Graphs}
+##########################
+### Reading in and processing TSV tables from HD All lineage markers were used for analysis (tSNE set # 2 12092021)
+File_path <- "../Fraction_V_DFs/OLIGO/TSV_HD_120921"
+
+list.files(path = File_path, pattern = "*.tsv")
+filenames <- list.files(File_path, pattern = "*.tsv", recursive = TRUE)
+# Have to go to the working directory !!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+table.1 <- Map(cbind, lapply(filenames, read_tsv), filename = filenames)
+
+table_HD <- bind_rows(table.1)
+head(table_HD)
+
+table_HDA <- table_HD
+table_HD <- table_HDA
+
+glimpse(table_HD)
+table_HD %>% 
+filter(stringr::str_detect(filename, 'HD_3_O')) %>% count()
+
+table_HD <- table_HD %>% 
+  mutate(Patient = case_when(str_detect(filename, 'HD_1_O_1') ~ "HD1.1",
+                             str_detect(filename, 'HD_1_O_2') ~ "HD1.2",
+                             str_detect(filename, 'HD_2_O') ~ "HD2",
+                             str_detect(filename, 'HD_3_O') ~ "HD3"))%>%  # make them factors
+  mutate(Patient = factor(Patient, levels = c(
+    "HD1.1", "HD1.2", "HD2", "HD3"))) 
+
+glimpse(table_HD)
+unique(table_HD$Population_1)
+
+table_HD <- table_HD %>% 
+  mutate(Population_1 = gsub(".fcs.*","",table_HD$filename))
+
+table_HD_1 <- table_HD %>% filter(stringr::str_detect(Population_1, 'HD_1_O_1')) 
+table_HD_1 <- table_HD_1 %>% 
+  mutate(Population_2 = gsub("HD_1_O_1_*","",table_HD_1$Population_1))
+
+table_HD_1.2 <- table_HD %>% filter(stringr::str_detect(Population_1, 'HD_1_O_2')) 
+table_HD_1.2 <- table_HD_1.2 %>% 
+  mutate(Population_2 = gsub("HD_1_O_2_*","",table_HD_1.2$Population_1))
+
+table_HD_2 <- table_HD %>% filter(stringr::str_detect(Population_1, 'HD_2_O_')) 
+table_HD_2 <- table_HD_2 %>% 
+  mutate(Population_2 = gsub("HD_2_O_*","",table_HD_2$Population_1))
+
+table_HD_3 <- table_HD %>% filter(stringr::str_detect(Population_1, 'HD_3_O_')) 
+table_HD_3 <- table_HD_3 %>% 
+  mutate(Population_2 = gsub("HD_3_O_*","",table_HD_3$Population_1))
+
+HD_Table <- rbind(table_HD_1,table_HD_1.2,table_HD_2,table_HD_3) %>% select(-Population_1) %>% 
+  dplyr::rename(Population = Population_2) %>% mutate_if(is.character,as.factor)
+dim(HD_Table)
+glimpse(HD_Table)
+
+```
+
+```{Main tSNE Data Graphs}
+### Reading in and processing TSV tables from Patients All lineage markers were used for analysis (tSNE set # 1 12082021)
+
+##########################
+#Patient data
+##########################
+library(vroom)
+files_O <- list.files("../Fraction_V_DFs/OLIGO/Fraction_V-JAFCM108_Main_Gating_3500/")
+files_to_filter <- files_O[!grepl("Pt_24", files_O)]
+files <- paste0("../Fraction_V_DFs/OLIGO/Fraction_V-JAFCM108_Main_Gating_3500/",files_to_filter)
+
+table_Pt <- vroom(files, id = files_O)
+
+table_Pt$`Pt_1_O_CD14- DC3s.tsv`
+table_Pt %<>%  rename(ID = `Pt_1_O_CD14- DC3s.tsv`)
+table_Pt$ID %>% unique()
+
+table_Pt %>% group_by(ID) %>% tally()
+
+table_Pt %<>% 
+  mutate(Patient = gsub("^.*Pt.*?([0-9]+).*", "\\1",table_Pt$ID))
+table_Pt %>% distinct(ID)
+
+table_Pt %<>% mutate(
+  Population = str_extract(str_split(ID, '3500/Pt_[0-9]+_O_', simplify = TRUE)[,2], "[^.]+"), ID)
+glimpse(table_Pt)
+table_Pt %>% distinct(Population)
+
+##########################
+#HD
+##########################
+
+files_O_HD <- list.files("../Fraction_V_DFs/OLIGO/Main_Gating_PBMC_HD_JAFCM108/")
+files_to_filter <- files_O[!grepl("Pt_24", files_O)]
+files.HD <- paste0("../Fraction_V_DFs/OLIGO/Main_Gating_PBMC_HD_JAFCM108/",files_O_HD)
+
+table_HD <- vroom(files.HD, id = files.HD)
+glimpse(table_HD)
+table_HD$`../Fraction_V_DFs/OLIGO/Main_Gating_PBMC_HD_JAFCM108/HD 1 O_CD14-DC3s.tsv`
+table_HD %<>%  rename(ID = `../Fraction_V_DFs/OLIGO/Main_Gating_PBMC_HD_JAFCM108/HD 1 O_CD14-DC3s.tsv`)
+
+table_HD %>% group_by(ID) %>% tally()
+table_HD %<>% 
+  mutate(Patient = gsub("^.*HD.*?([0-9]+).*", "\\1",table_HD$ID),
+         Patient = paste0("HD",Patient)) 
+
+table_HD %>% distinct(Patient)
+
+glimpse(HD1)
+HD1 <- table_HD %>% mutate(
+  Population = str_extract(str_split(ID, '108/HD [0-9]+ O_', simplify = TRUE)[,2], "[^.]+"), ID) %>%  filter(Patient == "HD1") 
+
+HD2 <- table_HD %>% mutate(
+  Population = str_extract(str_split(ID, '108/HD [0-9]+ O_', simplify = TRUE)[,2], "[^.]+"), ID) %>%  filter(Patient == "HD2")
+
+HD3 <- table_HD %>% mutate(
+  Population = str_extract(str_split(ID, '108/HD[0-9]+ O_', simplify = TRUE)[,2], "[^.]+"), ID) %>%  filter(Patient == "HD3")
+
+table_HD <- rbind(HD1,HD2,HD3)
+table_HD %>%  filter(Patient == "HD3") %>%  distinct(Population)
+
+tSNE_TABLE <- rbind(table_HD,table_Pt)
+
+
+tSNE_TABLE %<>% dplyr::mutate(Population = dplyr::recode(Population, 
+                                                      "CD5- cDC2s" = "CD5-cDC2s",
+                                                      "CD5+ cDC2s" = "CD5+cDC2s",
+                                                      "pDC_from_pre" = "pDC",
+                                                      "CD14- DC3s" = "CD14-DC3s",
+                                                      "CD14+ DC3s" = "CD14+DC3s",
+                                                      "CD5- cDC2s" = "CD5-cDC2s",
+                                                      "CD5- DC2s" = "CD5-cDC2s")) 
+tSNE_TABLE$Population %>% unique()
+glimpse(tSNE_TABLE)
+
+cols <- A %>% select(`BV605-A (CD14)` :`Red 718-A (CD86)`) %>%  names()
+to_app <- A %>% select(`BV605-A (CD14)` :`Red 718-A (CD86)`) %>% 
+  set_names(names(.) %>% str_extract("(?<=\\()[^)(]+(?=\\))")) %>%  names()
+cols <- setNames(cols, paste0(cols, to_app))
+
+tSNE_TABLE <- cbind(tSNE_TABLE %>% select(ID,Patient, Population),
+      tSNE_TABLE %>% select(`BV605-A (CD14)` :`Red 718-A (CD86)`) %>% 
+  set_names(names(.) %>% str_extract("(?<=\\()[^)(]+(?=\\))")))
+
+tSNE_TABLE
+
+##########################
+##########################
+
+write.table(tSNE_TABLE, file='../Fraction_V_DFs/OLIGO_tSNE_TABLE_100522.tsv', quote=FALSE, sep='\t', col.names = NA)
+```
+# =============================
+# tSNE_TABLE_Oligo
+```{r}
+tSNE_TABLE_Oligo <-  read_tsv("../Fraction_V_DFs/OLIGO_tSNE_TABLE_100522.tsv")
+```
+
+```{r Main tSNE Data Graphs}
+glimpse(tSNE_TABLE_Oligo)
+
+tSNE_TABLE_Oligo %<>% select(-...1, -ID) %>% 
+  mutate(ID = row_number(), .before = Patient) %>% 
+  mutate(ID_Individual = paste(ID,Patient,Population, sep ="_"),.before = ID) %>% 
+  mutate(Patient_Popul = paste(Patient,Population, sep ="_"),.before = ID_Individual)
+
+tSNE_TABLE_Oligo %<>% mutate(Patient_Popul = paste(Patient,Population, sep ="_"),.before = ID)
+
+Cluster_Markers <- c("CD88_89", "CD86",  "CD11c", "CD301", "ILT3", 
+ "CD16", "ICOSLG", "CD206", "HLA-DR", "CD14", "CD45RA", 
+"CD5", "CD141",  "CD169_AXL", "CD1c", "FcerG", "CD163", 
+"CD303", "PD-L1", "CD123", "CD36")
+
+tSNE_TABLE_Oligo %<>% mutate_at(vars(Cluster_Markers), ~ heatmaply::normalize(.)+0.001)
+
+set.seed(123)
+# tSNE_Oligo_Samlped <- tSNE_TABLE_Oligo %>% 
+#   group_by(Patient_Popul) %>% 
+#   slice_sample(prop=.25, replace = F) %>%
+#   ungroup()
+
+tSNE_TABLE_Oligo %>%  group_by(Patient_Popul) %>% tally() %>% dplyr::filter(n > 2500)
+  
+
+Larger_populations <- dput(as.character(tSNE_TABLE_Oligo %>%  group_by(Patient_Popul) %>% tally() %>% 
+  dplyr::filter(n > 2500) %>%  pull(Patient_Popul) %>% unique()))
+
+
+Medium_populations <- dput(as.character(tSNE_TABLE_Oligo %>%  group_by(Patient_Popul) %>% tally() %>% 
+  dplyr::filter(n > 800 & n < 2500) %>%  pull(Patient_Popul) %>% unique()))
+
+Small_populations <- dput(as.character(tSNE_TABLE_Oligo %>%  group_by(Patient_Popul) %>% tally() %>% 
+  dplyr::filter(n < 800) %>%  pull(Patient_Popul) %>% unique()))
+
+##################3
+set.seed(123)
+tSNE_larger <-  tSNE_TABLE_Oligo %>%  dplyr::filter(Patient_Popul %in% c(Larger_populations)) %>% 
+    group_by(Patient_Popul) %>% 
+  slice_sample(prop=.20, replace = F) %>%
+  ungroup()
+
+tSNE_larger %>%  group_by(Patient_Popul) %>%  tally()
+
+set.seed(123)
+tSNE_Medium <-  tSNE_TABLE_Oligo %>%  dplyr::filter(Patient_Popul %in% c(Medium_populations)) %>% 
+    group_by(Patient_Popul) %>% 
+  slice_sample(prop=.30, replace = F) %>%
+  ungroup()
+
+tSNE_Medium %>%  group_by(Patient_Popul) %>%  tally()
+
+set.seed(123)
+tSNE_smaller <-  tSNE_TABLE_Oligo %>%  dplyr::filter(Patient_Popul %in% c(Small_populations))
+
+tSNE_FINAL<- rbind(tSNE_larger,tSNE_Medium,tSNE_smaller) 
+##################
+```
+
+```{r}
+ClinicalPhenoData <- read_csv("../Metadata/09_021_Clinl_Final.Table_06122022.csv")
+  #dplyr::mutate_if(is.character, as.factor) 
+
+ClinicalPhenoData %<>%  mutate(Sequence_Number = as.factor(Sequence_Number)) %>%  mutate_if(is.character, as.factor)
+ClinicalPhenoData
+tSNE_FINAL %<>% mutate_if(is.character, as.factor)
+unique(tSNE_FINAL$Patient) %in% unique(ClinicalPhenoData$Sequence_Number)
+
+tSNE_FINAL %<>%  left_join(ClinicalPhenoData, by = c("Patient" = "Sequence_Number"))
+
+glimpse(tSNE_FINAL)
+tSNE_FINAL %<>% dplyr::mutate_at(vars(Response:Outcome), ~ as.character(.)) %>% 
+  dplyr::mutate_at(vars(Response:Outcome), ~ if_else(is.na(.), 'HD', .)) %>% 
+  dplyr::mutate_at(vars(Response:Outcome), ~ as.factor(.))
+```
+
+# Subset tSNE markers
+```{r Main tSNE Data Graphs}
+######################
+# Subsetting 25% for smaller numbers 
+set.seed(235)
+tiny_numbers <- tSNE_FINAL %>%  group_by(Patient_Popul) %>% 
+  slice_sample(prop=.2, replace = F) %>%
+  ungroup()
+tiny_numbers_mat <- tiny_numbers %>% select(Cluster_Markers) %>%  as.matrix()
+rownames(tiny_numbers_mat) <- tiny_numbers$ID_Individual
+head(tiny_numbers_mat)
+######################
+# ss_UMAP_O_mat <- UMAP_Final %>% select(Cluster_Markers) %>%  as.matrix()
+# rownames(ss_UMAP_O_mat) <- UMAP_Final$ID_Individual
+```
+
+# Run tSNE
+```{r Main tSNE Data Graphs}
+library(Rtsne)
+head(tiny_numbers_mat)
+dim(tiny_numbers_mat)
+##########
+
+set.seed(235)
+tsne_44517_21 <- Rtsne(tiny_numbers_mat, dims = 2, perplexity=35, verbose=TRUE, max_iter = 500,check_duplicates = FALSE)
+
+tsne_44517_21_out <- as.data.frame(tsne_44517_21$Y)
+tsne_44517_21_out_full <- tsne_44517_21_out %>% cbind(tiny_numbers)
+
+tsne_44517_21_out_full %<>% rename(tSNE1 = V1,
+                                  tSNE2 = V2)
+
+tsne_44517_21_out_full$Population <- factor(tsne_44517_21_out_full$Population, levels = c("cMo", "iMo", "ncMo", "pDC", "pre-DCs", "t-DCs", "cDC1s",
+ "CD5+cDC2s","CD5-", "CD5-cDC2s", "CD14-DC3s", "CD14+DC3s"))
+
+tsne_44517_21_out_full %<>% 
+  dplyr::mutate(PURO_quantile = ntile(Puromycin,4))
+
+tsne_44517_21_out_full$PURO_quantile <- factor(
+tsne_44517_21_out_full$PURO_quantile, levels=c(
+  "4",
+  "3",
+  "2",
+  "1"))
+```
+
+
+```{r Main tSNE Data Graphs}
+png("../Figures_Fraction_V/tSNE/tSNE_1_Lineage_PURO_legend.png", 
+    height=7, width=9, units="in", res=600)
+tsne_44517_21_out_full[sample(nrow(tsne_44517_21_out_full), nrow(tsne_44517_21_out_full)), ] %>% 
+   filter(Population != "t-DCs") %>% 
+  #sample_n(size = 10000, replace = T) %>%
+  ggplot(aes(y = tSNE1, x = tSNE2, color = PURO_quantile)) +
+  geom_point(size = 0.05, alpha = 0.7) +
+  scale_color_manual(values = c("red","tomato","dodgerblue","navy"))+
+  theme_bw()+
+  guides(color = guide_legend(override.aes = list(size = 5), ncol = 1))+
+  theme(legend.position = "right", aspect.ratio = 1/1,
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill ="white"),
+        panel.border = element_rect(colour = "white", fill=NA, size=0.5),
+        strip.text = element_text(size = 14, face ="bold"),              # to label add individual box
+        strip.background =element_rect(fill="white"),                    # to color individual box
+        axis.text.x = element_text(face="bold", color="black",size=14, angle = 0,vjust = 0.1), 
+        # to label x-axis tics/number labels
+        axis.text.y = element_text(face="bold", color="black",size=14),  # to label y-axis tics/number labels
+        axis.title.x=element_blank(),                                    # to label/remove x-axis labels
+        axis.title.y=element_blank(),                                    # to label/remove y-axis labels
+        axis.ticks = element_blank()) +
+  tsne_44517_21_out_full[sample(nrow(tsne_44517_21_out_full), nrow(tsne_44517_21_out_full)), ] %>% 
+    filter(Population != "t-DCs") %>% 
+  ggplot(aes(y = tSNE1, x = tSNE2, color = Population)) +
+  geom_point(size = 0.05, alpha = 0.7) +
+  scale_color_manual(values = c(my_populations_cols))+
+  theme_bw()+
+  guides(color = guide_legend(override.aes = list(size = 5), ncol = 1))+
+  theme(legend.position = "right", aspect.ratio = 1/1,
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill ="white"),
+        panel.border = element_rect(colour = "white", fill=NA, size=0.5),
+        strip.text = element_text(size = 14, face ="bold"),              # to label add individual box
+        strip.background =element_rect(fill="white"),                    # to color individual box
+        axis.text.x = element_text(face="bold", color="black",size=14, angle = 0,vjust = 0.1), 
+        # to label x-axis tics/number labels
+        axis.text.y = element_text(face="bold", color="black",size=14),  # to label y-axis tics/number labels
+        axis.title.x=element_blank(),                                    # to label/remove x-axis labels
+        axis.title.y=element_blank(),                                    # to label/remove y-axis labels
+        axis.ticks = element_blank())
+dev.off()
+############################## ############################## ##############################
+png("../Figures_Fraction_V/tSNE/tSNE_1_Lineage_PURO_split.png", 
+    height=9, width=10, units="in", res=600)
+tsne_44517_21_out_full %>%  filter(Population != "t-DCs") %>% 
+  #filter(PURO_quantile %in% c("1", "4")) %>% 
+  #sample_n(size = 10000, replace = T) %>%
+  ggplot(aes(y = tSNE1, x = tSNE2, color = PURO_quantile)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  scale_color_manual(values = c("red","tomato","dodgerblue","navy"))+
+  theme_bw()+
+  guides(color = guide_legend(override.aes = list(size = 5), ncol = 1))+
+    facet_wrap(~Population) +
+  theme(legend.position = "right", aspect.ratio = 1/1,
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.background = element_blank(),
+        panel.border = element_rect(colour = "white", fill=NA, size=0.5),
+        strip.text = element_text(size = 14, face ="bold"),              # to label add individual box
+        axis.text.x = element_text(face="bold", color="black",size=14, angle = 0,vjust = 0.1), 
+        # to label x-axis tics/number labels
+        axis.text.y = element_text(face="bold", color="black",size=14),  # to label y-axis tics/number labels
+        axis.title.x=element_blank(),                                    # to label/remove x-axis labels
+        axis.title.y=element_blank(),                                    # to label/remove y-axis labels
+        axis.ticks = element_blank())
+dev.off()
+##############################
+##############################
+```
+
+```{r}
+tsne_44517_21_out_full$CD14 %>%  summary()
+tsne_44517_21_out_full[sample(nrow(tsne_44517_21_out_full), nrow(tsne_44517_21_out_full)), ] %>% 
+   filter(Population != "t-DCs") %>% 
+  #sample_n(size = 10000, replace = T) %>%
+  ggplot(aes(y = tSNE1, x = tSNE2, color = CD11c)) +
+  geom_point(size = 0.05, alpha = 1) +
+scale_color_viridis(option = "inferno",limits = c(0.007448, 0.277250)) +   theme_bw()+
+  guides(color = guide_legend(override.aes = list(size = 5), ncol = 1))+
+  theme(legend.position = "right", aspect.ratio = 1/1,
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill ="white"),
+        panel.border = element_rect(colour = "white", fill=NA, size=0.5),
+        strip.text = element_text(size = 14, face ="bold"),              # to label add individual box
+        strip.background =element_rect(fill="white"),                    # to color individual box
+        axis.text.x = element_text(face="bold", color="black",size=14, angle = 0,vjust = 0.1), 
+        # to label x-axis tics/number labels
+        axis.text.y = element_text(face="bold", color="black",size=14),  # to label y-axis tics/number labels
+        axis.title.x=element_blank(),                                    # to label/remove x-axis labels
+        axis.title.y=element_blank(),                                    # to label/remove y-axis labels
+        axis.ticks = element_blank())
+
+
+tsne_44517_21_out_full[sample(nrow(tsne_44517_21_out_full), nrow(tsne_44517_21_out_full)), ] %>% 
+   filter(Population != "t-DCs") %>% 
+  #sample_n(size = 10000, replace = T) %>%
+  ggplot(aes(y = tSNE1, x = tSNE2, color = CD123)) +
+  geom_point(size = 0.05, alpha = 1) +
+scale_color_viridis(option = "inferno",limits = c(0.4951, 0.9166)) +   theme_bw()+
+  guides(color = guide_legend(override.aes = list(size = 5), ncol = 1))+
+  theme(legend.position = "right", aspect.ratio = 1/1,
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill ="white"),
+        panel.border = element_rect(colour = "white", fill=NA, size=0.5),
+        strip.text = element_text(size = 14, face ="bold"),              # to label add individual box
+        strip.background =element_rect(fill="white"),                    # to color individual box
+        axis.text.x = element_text(face="bold", color="black",size=14, angle = 0,vjust = 0.1), 
+        # to label x-axis tics/number labels
+        axis.text.y = element_text(face="bold", color="black",size=14),  # to label y-axis tics/number labels
+        axis.title.x=element_blank(),                                    # to label/remove x-axis labels
+        axis.title.y=element_blank(),                                    # to label/remove y-axis labels
+        axis.ticks = element_blank())
+
+tsne_44517_21_out_full[sample(nrow(tsne_44517_21_out_full), nrow(tsne_44517_21_out_full)), ] %>% 
+   filter(Population != "t-DCs") %>% 
+  #sample_n(size = 10000, replace = T) %>%
+  ggplot(aes(y = tSNE1, x = tSNE2, color = CD14)) +
+  geom_point(size = 0.05, alpha = 1) +
+ scale_color_viridis(option = "viridis",limits = c(0.03967, 0.83214)) +   theme_bw()+
+  guides(color = guide_legend(override.aes = list(size = 5), ncol = 1))+
+  theme(legend.position = "right", aspect.ratio = 1/1,
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill ="white"),
+        panel.border = element_rect(colour = "white", fill=NA, size=0.5),
+        strip.text = element_text(size = 14, face ="bold"),              # to label add individual box
+        strip.background =element_rect(fill="white"),                    # to color individual box
+        axis.text.x = element_text(face="bold", color="black",size=14, angle = 0,vjust = 0.1), 
+        # to label x-axis tics/number labels
+        axis.text.y = element_text(face="bold", color="black",size=14),  # to label y-axis tics/number labels
+        axis.title.x=element_blank(),                                    # to label/remove x-axis labels
+        axis.title.y=element_blank(),                                    # to label/remove y-axis labels
+        axis.ticks = element_blank())
+
+tsne_44517_21_out_full[sample(nrow(tsne_44517_21_out_full), nrow(tsne_44517_21_out_full)), ] %>% 
+   filter(Population != "t-DCs") %>% 
+  #sample_n(size = 10000, replace = T) %>%
+  ggplot(aes(y = tSNE1, x = tSNE2, color = CD141)) +
+  geom_point(size = 0.05, alpha = 1) +
+scale_color_viridis(option = "inferno",limits = c(0.07837, 0.94486)) +   theme_bw()+
+  guides(color = guide_legend(override.aes = list(size = 5), ncol = 1))+
+  theme(legend.position = "right", aspect.ratio = 1/1,
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill ="white"),
+        panel.border = element_rect(colour = "white", fill=NA, size=0.5),
+        strip.text = element_text(size = 14, face ="bold"),              # to label add individual box
+        strip.background =element_rect(fill="white"),                    # to color individual box
+        axis.text.x = element_text(face="bold", color="black",size=14, angle = 0,vjust = 0.1), 
+        # to label x-axis tics/number labels
+        axis.text.y = element_text(face="bold", color="black",size=14),  # to label y-axis tics/number labels
+        axis.title.x=element_blank(),                                    # to label/remove x-axis labels
+        axis.title.y=element_blank(),                                    # to label/remove y-axis labels
+        axis.ticks = element_blank())
+
+tsne_44517_21_out_full$CD1c %>%  summary()
+
+tsne_44517_21_out_full[sample(nrow(tsne_44517_21_out_full), nrow(tsne_44517_21_out_full)), ] %>% 
+   filter(Population != "t-DCs") %>% 
+  #sample_n(size = 10000, replace = T) %>%
+  ggplot(aes(y = tSNE1, x = tSNE2, color = CD1c)) +
+  geom_point(size = 0.05, alpha = 1) +
+ scale_color_viridis(option = "inferno",limits = c(0, 0.45295)) +   theme_bw()+
+  guides(color = guide_legend(override.aes = list(size = 5), ncol = 1))+
+  theme(legend.position = "right", aspect.ratio = 1/1,
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill ="white"),
+        panel.border = element_rect(colour = "white", fill=NA, size=0.5),
+        strip.text = element_text(size = 14, face ="bold"),              # to label add individual box
+        strip.background =element_rect(fill="white"),                    # to color individual box
+        axis.text.x = element_text(face="bold", color="black",size=14, angle = 0,vjust = 0.1), 
+        # to label x-axis tics/number labels
+        axis.text.y = element_text(face="bold", color="black",size=14),  # to label y-axis tics/number labels
+        axis.title.x=element_blank(),                                    # to label/remove x-axis labels
+        axis.title.y=element_blank(),                                    # to label/remove y-axis labels
+        axis.ticks = element_blank())
+
+```
+
+# Oligo BAR Plot
+```{r}
+png("../Figures_Fraction_V/Oligo/Oligo_Pop_counts_fill.png", 
+    height=3, width=6, units="in", res=600)
+tsne_44517_21_out_full %>% group_by(PURO_quantile,Population) %>%  filter(Population != "t-DCs") %>% 
+  dplyr::summarise(n = n()) %>%
+  ggplot(aes(x = Population, y = n, fill = PURO_quantile)) +
+  geom_bar(stat = "identity",position = "fill", width = .75, alpha = 0.7) +
+  scale_fill_manual(values = c("red","tomato","dodgerblue","navy"))+
+  theme_bw()+
+  guides(color = guide_legend(override.aes = list(size = 5), ncol = 1))+
+    # facet_wrap(~Population, scales = "free",
+    #             labeller = label_wrap_gen(width = 5, multi_line = TRUE)) + 
+  ggtitle("Cell numbers per Oligo Quantile") + xlab("") + ylab("cells (n)")+
+  theme(legend.position = "right", aspect.ratio = 1/3,
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA, size=0.5),
+        strip.text = element_text(size = 12, face ="bold"),              # to label add individual box
+        axis.text.x = element_text(face="plain", color="black",size=14, angle = 90,vjust = 0.1), 
+        # to label x-axis tics/number labels
+        axis.text.y = element_text(face="plain", color="black",size=14),  # to label y-axis tics/number labels
+        axis.title.x=element_blank(),                                    # to label/remove x-axis labels
+        axis.title.y=element_blank(),                                    # to label/remove y-axis labels
+        axis.ticks = element_blank())
+dev.off()
+
+```
+
+
+# OLIGO Median Quantiles 
+```{r}
+tSNE_FINAL
+
+tSNE_FINAL %<>% 
+  dplyr::mutate(PURO_quantile = ntile(Puromycin,4))
+
+tSNE_FINAL$PURO_quantile <- factor(
+tSNE_FINAL$PURO_quantile, levels=c(
+  "4",
+  "3",
+  "2",
+  "1"))
+
+tSNE_FINAL %>% glimpse()
+ss_O_tSNE.median <- tSNE_FINAL %>% 
+ group_by(Population,Patient_Popul,PURO_quantile) %>% 
+  dplyr::summarise(across(where(is.numeric), ~ median(.x, na.rm = TRUE))) %>% ungroup()
+
+ss_O_tSNE.median %<>% 
+  mutate(Patient = str_split(ss_O_tSNE.median$Patient_Popul, '_', simplify = TRUE)[,1]) %>% 
+  mutate(Patient = as.factor(Patient))
+
+
+
+
+ss_O_tSNE.MED.CLIN <- ss_O_tSNE.median %>% select(-c(PF_Survival:PFS_ind)) %>% 
+  left_join(tiny_numbers %>%  
+              group_by(Patient) %>% 
+              filter(row_number() == 1) %>% 
+              select(Patient,Response:PFS_ind), 
+            by = c("Patient"))
+
+#ss_O_tSNE.MED.CLIN %>% write_csv("../Fraction_V_DFs/ss_O_tSNE.MED.CLIN")
+
+ss_O_tSNE.MED.CLIN.Tidy <- ss_O_tSNE.MED.CLIN %>%  gather(IM_Markers, Expression, Cluster_Markers)
+ss_O_tSNE.MED.CLIN.Tidy
+
+ss_O_tSNE.MED.CLIN.Tidy$Population <- factor(ss_O_tSNE.MED.CLIN.Tidy$Population, levels = c("cMo", "iMo", "ncMo", "pDC", "pre-DCs", "t-DCs", "cDC1s",
+ "CD5+cDC2s","CD5-", "CD5-cDC2s", "CD14-DC3s", "CD14+DC3s"))
+############################################################
+```
+
+# Stats code
+```{r}
+# test if data is normally distributed
+Test_B <- ss_O_tSNE.MED.CLIN.Tidy %>% 
+     filter(PURO_quantile %in% c("1", "4")) %>% 
+    group_by(Population,IM_Markers, PURO_quantile) %>%  
+      do(tidy(shapiro.test(.$Expression))) %>% 
+    ungroup() %>% 
+    select(-method)
+Test_B
+Test_B %<>% mutate(Normality = case_when(
+    p.value > 0.05 ~ "Normal",
+  p.value < 0.05 ~ "Not.Normal"
+))
+Test_B %>% filter(Normality == "Normal")
+Test_B %>% filter(Normality == "Not.Normal") %>%  pull(IM_Markers)
+
+
+# 
+# # Filter Imm_Wilcoxon_markeres
+# Oligo_test_w <-  ss_O_tSNE.MED.CLIN.Tidy %>% 
+#    filter(PURO_quantile %in% c("1", "4")) %>% filter(IM_Markers %in% c(Imm_Wilcoxon_markeres)) %>% 
+#   group_by(Population,IM_Markers) %>%  
+#   t_test(Expression ~ PURO_quantile) %>% add_y_position()
+```
+
+#3. BOX Oligo Immune
+```{r}
+
+Oligo_test_PDL1 <- ss_O_tSNE.MED.CLIN.Tidy %>% filter(IM_Markers %in% c("PD-L1")) %>% 
+  filter(Population != "t-DCs") %>% 
+   filter(PURO_quantile %in% c("1", "4")) %>% filter(Expression < 0.057) %>% 
+    group_by(Population,IM_Markers) %>%
+  t_test(Expression ~ PURO_quantile) %>% add_y_position()
+
+png("../Figures_Fraction_V/Oligo/OLIGO_PD-L1.png",
+    height=2, width=20, units="in", res=600)
+ss_O_tSNE.MED.CLIN.Tidy %>% filter(Expression < 0.057) %>% filter(Population != "t-DCs") %>% 
+  filter(IM_Markers %in% c("PD-L1")) %>%   filter(PURO_quantile %in% c("1", "4")) %>% 
+  ggplot(aes(x = PURO_quantile, y = Expression)) +
+        geom_boxplot(aes(group=PURO_quantile),outlier.colour = NA, col = "grey50", alpha = 0.7) +
+  geom_jitter(position = jitter_2, shape=21,color="black",size = 2, alpha = 0.5,    aes(color=Response,fill=Response)) +
+  #geom_vline(xintercept = c(2.5),col="black", lwd = 0.5, linetype="dashed", alpha=1)+
+  scale_color_manual(values = c(cols.Response.assign))+
+  scale_fill_manual(values = c(cols.Response.assign)) +
+    stat_pvalue_manual(Oligo_test_PDL1, label = "p", tip.length = 0,
+                     vjust = 0.01, y.position = 0.0565,
+                     size=3,
+                     hide.ns = FALSE)+
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.15)))+
+  theme_classic() +
+  facet_wrap(~Population, scales = "free_x", nrow = 1,
+             labeller = label_wrap_gen(width = 5, multi_line = TRUE)) +
+  ggtitle("PD-L1") +
+  theme(
+  legend.position = "right", aspect.ratio = 1/0.6,
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  strip.text = element_text(size = 9, face ="bold"),              # to label add individual box
+  strip.background =element_blank(), 
+  panel.border = element_rect(colour = NA, fill=NA, size=0.5),
+  # to color individual box
+  axis.text.x = element_text(face="plain", color="black",size=10),
+  # to label x-axis tics/number labels
+  axis.text.y = element_text(face="plain", color="black",size=10),  # to label y-axis tics/number labels
+  axis.title.x= element_blank(),                                    # to label/remove x-axis labels
+  axis.title.y= element_text(face="plain", color="black",size=10),    # to label/remove y-axis labels
+  axis.ticks.y = element_line(colour = "black", size = 1),
+  axis.ticks = element_blank())
+dev.off()
+
+
+Oligo_test_ILT3 <- ss_O_tSNE.MED.CLIN.Tidy %>% filter(IM_Markers %in% c("ILT3")) %>% 
+   filter(PURO_quantile %in% c("1", "4")) %>% filter(Population != "t-DCs") %>% 
+    group_by(Population,IM_Markers) %>%
+  t_test(Expression ~ PURO_quantile) %>% add_y_position()
+
+png("../Figures_Fraction_V/Oligo/OLIGO_ILT3.png",
+    height=2, width=20, units="in", res=600)
+ss_O_tSNE.MED.CLIN.Tidy %>% filter(Population != "t-DCs") %>% 
+  filter(IM_Markers %in% c("ILT3")) %>%   filter(PURO_quantile %in% c("1", "4")) %>% 
+  ggplot(aes(x = PURO_quantile, y = Expression)) +
+        geom_boxplot(aes(group=PURO_quantile),outlier.colour = NA, col = "grey50", alpha = 0.7) +
+  geom_jitter(position = jitter_2, shape=21,color="black",size = 2, alpha = 0.5,    aes(color=Response,fill=Response)) +
+  #geom_vline(xintercept = c(2.5),col="black", lwd = 0.5, linetype="dashed", alpha=1)+
+  scale_color_manual(values = c(cols.Response.assign))+
+  scale_fill_manual(values = c(cols.Response.assign)) +
+    stat_pvalue_manual(Oligo_test_ILT3, label = "p", tip.length = 0,
+                     vjust = 0.01,
+                     size=3,
+                     hide.ns = FALSE)+
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.15)))+
+  theme_classic() +
+  facet_wrap(~Population, scales = "free_x", nrow = 1,
+             labeller = label_wrap_gen(width = 5, multi_line = TRUE)) +
+  ggtitle("ILT3") +
+  theme(
+  legend.position = "right", aspect.ratio = 1/0.6,
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  strip.text = element_text(size = 9, face ="bold"),              # to label add individual box
+  strip.background =element_blank(), 
+  panel.border = element_rect(colour = NA, fill=NA, size=0.5),
+  # to color individual box
+  axis.text.x = element_text(face="plain", color="black",size=10),
+  # to label x-axis tics/number labels
+  axis.text.y = element_text(face="plain", color="black",size=10),  # to label y-axis tics/number labels
+  axis.title.x= element_blank(),                                    # to label/remove x-axis labels
+  axis.title.y= element_text(face="plain", color="black",size=10),    # to label/remove y-axis labels
+  axis.ticks.y = element_line(colour = "black", size = 1),
+  axis.ticks = element_blank())
+dev.off()
+
+Oligo_test_HLA.DR <- ss_O_tSNE.MED.CLIN.Tidy %>% filter(IM_Markers %in% c("HLA-DR")) %>% 
+   filter(PURO_quantile %in% c("1", "4")) %>% filter(Population != "t-DCs") %>% 
+    group_by(Population,IM_Markers) %>%
+  t_test(Expression ~ PURO_quantile) %>% add_y_position()
+
+png("../Figures_Fraction_V/Oligo/OLIGO_HLA.DR.png",
+    height=2, width=20, units="in", res=600)
+ss_O_tSNE.MED.CLIN.Tidy %>% filter(Population != "t-DCs") %>% 
+  filter(IM_Markers %in% c("HLA-DR")) %>%   filter(PURO_quantile %in% c("1", "4")) %>% 
+  ggplot(aes(x = PURO_quantile, y = Expression)) +
+        geom_boxplot(aes(group=PURO_quantile),outlier.colour = NA, col = "grey50", alpha = 0.7) +
+  geom_jitter(position = jitter_2, shape=21,color="black",size = 2, alpha = 0.5,    aes(color=Response,fill=Response)) +
+  #geom_vline(xintercept = c(2.5),col="black", lwd = 0.5, linetype="dashed", alpha=1)+
+  scale_color_manual(values = c(cols.Response.assign))+
+  scale_fill_manual(values = c(cols.Response.assign)) +
+    stat_pvalue_manual(Oligo_test_HLA.DR, label = "p", tip.length = 0,
+                     vjust = 0.01,
+                     size=3,
+                     hide.ns = FALSE)+
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.15)))+
+  theme_classic() +
+  facet_wrap(~Population, scales = "free_x", nrow = 1,
+             labeller = label_wrap_gen(width = 5, multi_line = TRUE)) +
+  ggtitle("HLA-DR") +
+  theme(
+  legend.position = "right", aspect.ratio = 1/0.6,
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  strip.text = element_text(size = 9, face ="bold"),              # to label add individual box
+  strip.background =element_blank(), 
+  panel.border = element_rect(colour = NA, fill=NA, size=0.5),
+  # to color individual box
+  axis.text.x = element_text(face="plain", color="black",size=10),
+  # to label x-axis tics/number labels
+  axis.text.y = element_text(face="plain", color="black",size=10),  # to label y-axis tics/number labels
+  axis.title.x= element_blank(),                                    # to label/remove x-axis labels
+  axis.title.y= element_text(face="plain", color="black",size=10),    # to label/remove y-axis labels
+  axis.ticks.y = element_line(colour = "black", size = 1),
+  axis.ticks = element_blank())
+dev.off()
+```
+
+
+```{r}
+png("../Figures_Fraction_V/Oligo/Oligo_ncMo.png",
+    height=12, width=12, units="in", res=600)
+ss_O_tSNE.MED.CLIN.Tidy %>% filter(Population %in% c("ncMo")) %>%   #filter(PURO_quantile %in% c("1", "4")) %>% 
+
+  ggplot(aes(x = PURO_quantile, y = Expression)) +
+        geom_boxplot(aes(group=PURO_quantile),outlier.colour = NA, col = "grey50", alpha = 0.7) +
+
+  geom_jitter(position = jitter_2, shape=21,color="black",size = 2, alpha = 0.5,    aes(color=Response,fill=Response)) +
+  #geom_vline(xintercept = c(2.5),col="black", lwd = 0.5, linetype="dashed", alpha=1)+
+  scale_color_manual(values = c(cols.Response.assign))+
+  scale_fill_manual(values = c(cols.Response.assign)) +
+stat_compare_means(
+    mapping=aes(label = format.pval(..p.adj.., digits = 3)),
+    method = "t.test", 
+    ref.group = "4",
+    size = 3.5)+
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  theme_bw() +
+  facet_wrap(~IM_Markers, scales = "free_y", nrow = 5,
+             labeller = label_wrap_gen(width = 5, multi_line = TRUE)) +
+  ggtitle("ncMo") +
+  theme(
+  legend.position = "right", aspect.ratio = 1/1.1,
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  strip.text = element_text(size = 12, face ="bold"),              # to label add individual box
+  strip.background =element_blank(), 
+  panel.border = element_rect(colour = "black", fill=NA, size=0.5),
+  # to color individual box
+  axis.text.x = element_text(face="plain", color="black",size=10),
+  # to label x-axis tics/number labels
+  axis.text.y = element_text(face="plain", color="black",size=10),  # to label y-axis tics/number labels
+  axis.title.x= element_blank(),                                    # to label/remove x-axis labels
+  axis.title.y= element_text(face="plain", color="black",size=10),    # to label/remove y-axis labels
+  axis.ticks = element_blank())
+dev.off()
+```
+
+
+```{r Main tSNE Data Graphs}
+ss_OLIGO.umap <- umap(ss_UMAP_O_mat)
+
+umap.UMAP(n_neighbors=n_neighbors,
+        min_dist=MIN_DIST,
+        n_components=2,
+        random_state=100,
+        metric= 'euclidean')
+
+# Load Clinical Data
+Clinical_DF <- read.csv("../Fraction_V_DFs/09_021_Clinl_Final.Table_06122022.csv") %>% 
+    dplyr::mutate(Sequence_Number = as.factor(Sequence_Number)) 
+#glimpse(Clinical_DF)
+unique(Clinical_DF$Sequence_Number)
+Clinical_DF$Response
+
+tSNE_TABLE_Oligo <- tSNE_TABLE_Oligo %>% 
+  dplyr::rename(Sequence_Number = Patient) %>%  mutate_if(is.character,as.factor)
+
+tSNE_TABLE_Oligo$Sequence_Number %>%  unique()
+Clinical_DF$Sequence_Number %>%  unique()
+setdiff(tSNE_TABLE_Oligo$Sequence_Number, Clinical_DF$Sequence_Number)
+
+tSNE_Oligo_FULL <- full_join(tSNE_TABLE_Oligo, Clinical_DF,by = "Sequence_Number") %>% 
+  select(filename:PFS_ind, `BUV496-A (CD123)`:`SOM 2 distance`)
+tSNE_Oligo_FULL 
+tSNE_Oligo_FULL %>% glimpse()
+
+
+tSNE_Oligo_FULL %<>% dplyr::mutate_at(vars(Response:Outcome), ~ if_else(is.na(.), 'HD', .))
+dput(as.character(tSNE_Oligo_FULL %>%  pull(Population) %>% unique()))
+
+tSNE_Oligo_FULL %>% filter(is.na(Population)) 
+c("CD163- CD14-", "CD163- CD14+", "CD163+ CD14-", "CD163+ CD14+", 
+"CD5+ cDC2s", "cDC1s", "cMo", "iMo", "ncMo", "pDC_from_pre", 
+"pre-DCs", NA)
+
+
+FV_108.Clincal$population <- factor(FV_108.Clincal$population, levels = c("cMo", "iMo", "ncMo", "CD123+ DCs", "pDC", "pre-DCs", "cDC1s",
+ "CD5+cDC2s","CD5-", "CD5-cDC2s", "CD14-DC3s", "CD14+DC3s"))
+colnames(tSNE_TABLE_CLinical)
+tSNE_TABLE_CLinical <- tSNE_TABLE_CLinical %>% 
+  dplyr::rename(tSNE_1 ='t-SNE 1',
+                tSNE_2 ='t-SNE 2',
+                SOM_1_cluster_ID = "SOM 1 cluster ID",
+                SOM_1_distance = "SOM 1 distance",
+                tSNE_3 ='t-SNE 3',
+                tSNE_4 ='t-SNE 4',
+                SOM_2_cluster_ID = "SOM 2 cluster ID",
+                SOM_2_distance = "SOM 2 distance")
+
+tSNE_TABLE_CLinical <- tSNE_TABLE_CLinical %>% mutate_if(is.character,as.factor)
+
+write.table(Pt_DF, file='tSNE_TABLE_CLinical_091221.tsv', quote=FALSE, sep='\t', col.names = NA)
+
+tSNE_TABLE_CLinical %>% group_by(Population, Sequence_Number) %>% 
+  filter(Sequence_Number == "1") %>% count()
+
+glimpse(tSNE_TABLE_CLinical)
+tSNE_TABLE_CLin_Tidy <- tSNE_TABLE_CLinical  %>% select(Sequence_Number,Time,`BUV395-A (CD45)`:PFS_ind) %>% 
+  gather(key = "Maker", value = "Expression",`BUV395-A (CD45)`:`APC-Fire 750-A (CD88_89)`)
+
+tSNE_TABLE_CLin_Tidy$Maker
+tSNE_TABLE_CLin_Tidy$`BUV737-A (CD163)`
+
+DID <- tSNE_TABLE_CLin_Tidy %>% 
+mutate(New_Mark =sapply(str_extract_all(tSNE_TABLE_CLin_Tidy$Maker, "(?<=\\()[^)(]+(?=\\))"), paste0, collapse =","))
+rename_all(gsub, pattern = "\\..*","", replacement = '\\') %>% 
+  rename_all(gsub, pattern = 'pDC_from_pre_', replacement = '')
+DID <- DID %>% mutate_if(is.character,as.factor)
+
+
+tSNE_TABLE_CLinical[sample(nrow(tSNE_TABLE_CLinical), 1000), ]
+
+
+tSNE_TABLE_CLinical$Outcome.1 <- factor(tSNE_TABLE_CLinical$Outcome.1, levels=c("HD","Good","Stable","Bad"))
+tSNE_TABLE_CLinical$Population <- factor(tSNE_TABLE_CLinical$Population, levels=c("cMo","iMo","ncMo","pDC_from_pre","pre-DCs",
+                                                                                            "cDC1s","CD5+ cDC2s",
+                                                                                            "CD163+ CD14+","CD163+ CD14-","CD163- CD14-","CD163- CD14+"))
+unique(tSNE_TABLE_CLinical$Population)
+
+
+tSNE_TABLE_CLinical$Response <- factor(tSNE_TABLE_CLinical$Response, levels=c("HD","PR","SD","NED1","NED2","PD"))
+
+dim(tSNE_TABLE_CLinical)
+
+
+### Log heatmaply::normalized data to visualize Puromycin Expression 
+ggplot(tSNE_TABLE_CLinical, aes(x = log(`Alexa Fluor 488-A (Puromycin)`)))+ geom_histogram(bins = 1000)
+
+tSNE_TABLE_CLinical_NORM <- tSNE_TABLE_CLinical
+
+tSNE_TABLE_CLinical_NORM[, (9:37)] <- log(tSNE_TABLE_CLinical_NORM[, (9:37)])
+
+
+tSNE_TABLE_CLinical_Quant<- tSNE_TABLE_CLinical_NORM %>% 
+  dplyr::mutate(PURO_quantile = ntile(tSNE_TABLE_CLinical$`Alexa Fluor 488-A (Puromycin)`,4))
+
+tSNE_TABLE_CLinical_Quant$PURO_quantile <- factor(tSNE_TABLE_CLinical_Quant$PURO_quantile, levels=c(
+  "4",
+  "3",
+  "2",
+  "1"))
+```
+
+
+```{r Main tSNE Data Graphs}
+### Lineage Marker tSNE (Downsample = 150000 cells)
+#####
+png("C:/Users/jadamik/Box/Juraj Adamik/09-021_FCM_Data_Analysis/JAFCM107_Figures_112921/tSNE/tSNE_1_Lineage.png", 
+    height=3, width=6, units="in", res=600)
+
+tSNE_TABLE_CLinical[sample(nrow(tSNE_TABLE_CLinical), 150000), ] %>% 
+  #sample_n(size = 10000, replace = T) %>%
+  ggplot(aes(y = tSNE_1, x = tSNE_2, color = Population)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  #scale_color_manual(values = c("tomato","purple","dodgerblue","grey60"))+
+  #facet_wrap(~treatment,ncol =3)+
+  theme_bw()+
+  guides(color = guide_legend(override.aes = list(size = 5), ncol = 1))+
+  theme(legend.position = "right", aspect.ratio = 1/1,
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill ="white"),
+        panel.border = element_rect(colour = "white", fill=NA, size=0.5),
+        strip.text = element_text(size = 14, face ="bold"),              # to label add individual box
+        strip.background =element_rect(fill="white"),                    # to color individual box
+        axis.text.x = element_text(face="bold", color="black",size=14, angle = 0,vjust = 0.1), 
+        # to label x-axis tics/number labels
+        axis.text.y = element_text(face="bold", color="black",size=14),  # to label y-axis tics/number labels
+        axis.title.x=element_blank(),                                    # to label/remove x-axis labels
+        axis.title.y=element_blank(),                                    # to label/remove y-axis labels
+        axis.ticks = element_blank())
+dev.off()
+
+
+png("C:/Users/jadamik/Box/Juraj Adamik/09-021_FCM_Data_Analysis/JAFCM107_Figures_112921/tSNE/tSNE_1_Lineage_PURO.png", 
+    height=3, width=6, units="in", res=600)
+tSNE_TABLE_CLinical_Quant[sample(nrow(tSNE_TABLE_CLinical_Quant), 150000), ] %>% 
+  #sample_n(size = 10000, replace = T) %>%
+  ggplot(aes(y = tSNE_1, x = tSNE_2, color = PURO_quantile)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  scale_color_manual(values = c("red","tomato","doddgerblue","navy"))+
+  theme_bw()+
+  guides(color = guide_legend(override.aes = list(size = 5), ncol = 1))+
+  theme(legend.position = "right", aspect.ratio = 1/1,
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill ="white"),
+        panel.border = element_rect(colour = "white", fill=NA, size=0.5),
+        strip.text = element_text(size = 14, face ="bold"),              # to label add individual box
+        strip.background =element_rect(fill="white"),                    # to color individual box
+        axis.text.x = element_text(face="bold", color="black",size=14, angle = 0,vjust = 0.1), 
+        # to label x-axis tics/number labels
+        axis.text.y = element_text(face="bold", color="black",size=14),  # to label y-axis tics/number labels
+        axis.title.x=element_blank(),                                    # to label/remove x-axis labels
+        axis.title.y=element_blank(),                                    # to label/remove y-axis labels
+        axis.ticks = element_blank())
+dev.off()
+
+
+png("C:/Users/jadamik/Box/Juraj Adamik/09-021_FCM_Data_Analysis/JAFCM107_Figures_112921/tSNE/tSNE_1_Lineage_PURO_1.png", 
+    height=3, width=6, units="in", res=600)
+tSNE_TABLE_CLinical_Quant[sample(nrow(tSNE_TABLE_CLinical_Quant), 150000), ] %>% 
+  #sample_n(size = 10000, replace = T) %>%
+  ggplot(aes(y = tSNE_1, x = tSNE_2, color = PURO_quantile)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  scale_color_manual(values = c("red","grey85","grey85","navy"))+
+  theme_bw()+
+  guides(color = guide_legend(override.aes = list(size = 5), ncol = 1))+
+  theme(legend.position = "right", aspect.ratio = 1/1,
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill ="white"),
+        panel.border = element_rect(colour = "white", fill=NA, size=0.5),
+        strip.text = element_text(size = 14, face ="bold"),              # to label add individual box
+        strip.background =element_rect(fill="white"),                    # to color individual box
+        axis.text.x = element_text(face="bold", color="black",size=14, angle = 0,vjust = 0.1), 
+        # to label x-axis tics/number labels
+        axis.text.y = element_text(face="bold", color="black",size=14),  # to label y-axis tics/number labels
+        axis.title.x=element_blank(),                                    # to label/remove x-axis labels
+        axis.title.y=element_blank(),                                    # to label/remove y-axis labels
+        axis.ticks = element_blank())
+dev.off()
+
+png("C:/Users/jadamik/Box/Juraj Adamik/09-021_FCM_Data_Analysis/JAFCM107_Figures_112921/tSNE/tSNE_1_Lineage_PURO_C.png", 
+    height=3, width=6, units="in", res=600)
+tSNE_TABLE_CLinical_NORM[sample(nrow(tSNE_TABLE_CLinical_NORM), 150000), ] %>% 
+  #sample_n(size = 10000, replace = T) %>%
+  ggplot(aes(y = tSNE_1, x = tSNE_2, color = `Alexa Fluor 488-A (Puromycin)`)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  scale_color_jcolors_contin("rainbow", reverse = T)+
+  #scale_color_viridis(option = "plasma")+   
+  theme_bw()+
+  guides(color = guide_legend(override.aes = list(size = 5), ncol = 1))+
+  theme(legend.position = "right", aspect.ratio = 1/1,
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill ="white"),
+        panel.border = element_rect(colour = "white", fill=NA, size=0.5),
+        strip.text = element_text(size = 14, face ="bold"),              # to label add individual box
+        strip.background =element_rect(fill="white"),                    # to color individual box
+        axis.text.x = element_text(face="bold", color="black",size=14, angle = 0,vjust = 0.1), 
+        # to label x-axis tics/number labels
+        axis.text.y = element_text(face="bold", color="black",size=14),  # to label y-axis tics/number labels
+        axis.title.x=element_blank(),                                    # to label/remove x-axis labels
+        axis.title.y=element_blank(),                                    # to label/remove y-axis labels
+        axis.ticks = element_blank())
+dev.off()
+
+
+# Split Graph
+png("C:/Users/jadamik/Box/Juraj Adamik/09-021_FCM_Data_Analysis/JAFCM107_Figures_112921/tSNE/tSNE_1_Lineage_Split.png", 
+    height=5, width=7, units="in", res=600)
+
+tSNE_TABLE_CLinical[sample(nrow(tSNE_TABLE_CLinical), 150000), ] %>% 
+  #sample_n(size = 10000, replace = T) %>%
+  ggplot(aes(y = tSNE_1, x = tSNE_2, color = Population)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  #scale_color_manual(values = c("tomato","purple","dodgerblue","grey60"))+
+  facet_wrap(~Population,nrow = 3)+
+  theme_bw()+
+  guides(color = guide_legend(override.aes = list(size = 5), ncol = 1))+
+  theme(legend.position = "right", aspect.ratio = 1/1,
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill ="white"),
+        panel.border = element_rect(colour = "white", fill=NA, size=0.5),
+        strip.text = element_text(size = 10, face ="bold"),              # to label add individual box
+        strip.background =element_rect(fill="white",colour = "white"),                    # to color individual box
+        axis.text.x = element_text(face="bold", color="black",size=10, angle = 0,vjust = 0.1), 
+        # to label x-axis tics/number labels
+        axis.text.y = element_text(face="bold", color="black",size=10),  # to label y-axis tics/number labels
+        axis.title.x=element_blank(),                                    # to label/remove x-axis labels
+        axis.title.y=element_blank(),                                    # to label/remove y-axis labels
+        axis.ticks = element_blank())
+dev.off()
+
+# Split Graph Outcome
+png("C:/Users/jadamik/Box/Juraj Adamik/09-021_FCM_Data_Analysis/JAFCM107_Figures_112921/tSNE/tSNE_1_Lineage_Split_RESP.png", 
+    height=5, width=7, units="in", res=600)
+
+tSNE_TABLE_CLinical[sample(nrow(tSNE_TABLE_CLinical), 150000), ] %>% 
+  #sample_n(size = 10000, replace = T) %>%
+  ggplot(aes(y = tSNE_1, x = tSNE_2, color = Response)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  scale_color_manual(values=c("magenta","red","green","lightblue","blue","grey45"))+  
+  facet_wrap(~Population,nrow = 3)+
+  theme_bw()+
+  guides(color = guide_legend(override.aes = list(size = 5), ncol = 1))+
+  theme(legend.position = "right", aspect.ratio = 1/1,
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill ="white"),
+        panel.border = element_rect(colour = "white", fill=NA, size=0.5),
+        strip.text = element_text(size = 10, face ="bold"),              # to label add individual box
+        strip.background =element_rect(fill="white",colour = "white"),                    # to color individual box
+        axis.text.x = element_text(face="bold", color="black",size=10, angle = 0,vjust = 0.1), 
+        # to label x-axis tics/number labels
+        axis.text.y = element_text(face="bold", color="black",size=10),  # to label y-axis tics/number labels
+        axis.title.x=element_blank(),                                    # to label/remove x-axis labels
+        axis.title.y=element_blank(),                                    # to label/remove y-axis labels
+        axis.ticks = element_blank())
+dev.off()
+
+# Split Graph Lineage Outcome
+png("C:/Users/jadamik/Box/Juraj Adamik/09-021_FCM_Data_Analysis/JAFCM107_Figures_112921/tSNE/tSNE_1_Lineage_Split_OUT1.png", 
+    height=5, width=7, units="in", res=600)
+
+tSNE_TABLE_CLinical[sample(nrow(tSNE_TABLE_CLinical), 15000), ] %>% 
+  #filter(Sequence_Number != "HD1.2") %>%
+  ggplot(aes(y = tSNE_1, x = tSNE_2, color = Outcome.1)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  scale_color_manual(values=c("magenta","red","green","grey45","blue","grey45"))+  
+  facet_wrap(~Population,nrow = 3)+
+  theme_bw()+
+  guides(color = guide_legend(override.aes = list(size = 5), ncol = 1))+
+  theme(legend.position = "right", aspect.ratio = 1/1,
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill ="white"),
+        panel.border = element_rect(colour = "white", fill=NA, size=0.5),
+        strip.text = element_text(size = 10, face ="bold"),              # to label add individual box
+        strip.background =element_rect(fill="white",colour = "white"),                    # to color individual box
+        axis.text.x = element_text(face="bold", color="black",size=10, angle = 0,vjust = 0.1), 
+        # to label x-axis tics/number labels
+        axis.text.y = element_text(face="bold", color="black",size=10),  # to label y-axis tics/number labels
+        axis.title.x=element_blank(),                                    # to label/remove x-axis labels
+        axis.title.y=element_blank(),                                    # to label/remove y-axis labels
+        axis.ticks = element_blank())
+dev.off()
+
+
+# Split Graph Lineage Puromycin
+png("C:/Users/jadamik/Box/Juraj Adamik/09-021_FCM_Data_Analysis/JAFCM107_Figures_112921/tSNE/tSNE_1_Lineage_Split_PURO_1.png", 
+    height=5, width=7, units="in", res=600)
+tSNE_TABLE_CLinical_Quant[sample(nrow(tSNE_TABLE_CLinical_Quant), 150000), ] %>% 
+  #sample_n(size = 10000, replace = T) %>%
+  ggplot(aes(y = tSNE_1, x = tSNE_2, color = PURO_quantile)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  scale_color_manual(values = c("red","grey85","grey85","navy"))+
+  facet_wrap(~Population,nrow = 3)+
+  theme_bw()+
+  guides(color = guide_legend(override.aes = list(size = 5), ncol = 1))+
+  theme(legend.position = "right", aspect.ratio = 1/1,
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill ="white"),
+        panel.border = element_rect(colour = "white", fill=NA, size=0.5),
+        strip.text = element_text(size = 10, face ="bold"),              # to label add individual box
+        strip.background =element_rect(fill="white",colour = "white"),                    # to color individual box
+        axis.text.x = element_text(face="bold", color="black",size=10, angle = 0,vjust = 0.1), 
+        # to label x-axis tics/number labels
+        axis.text.y = element_text(face="bold", color="black",size=10),  # to label y-axis tics/number labels
+        axis.title.x=element_blank(),                                    # to label/remove x-axis labels
+        axis.title.y=element_blank(),                                    # to label/remove y-axis labels
+        axis.ticks = element_blank())
+dev.off()
+##########################################################################################################################
+
+##############################################################
+### Immune Marker tSNE (Downsample = 150000 cells)
+#####
+png("C:/Users/jadamik/Box/Juraj Adamik/09-021_FCM_Data_Analysis/JAFCM107_Figures_112921/tSNE/tSNE_1_Immune.png", 
+    height=3, width=6, units="in", res=600)
+
+tSNE_TABLE_CLinical[sample(nrow(tSNE_TABLE_CLinical), 150000), ] %>% 
+  #sample_n(size = 10000, replace = T) %>%
+  ggplot(aes(y = tSNE_3, x = tSNE_4, color = Population)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  #scale_color_manual(values = c("tomato","purple","dodgerblue","grey60"))+
+  #facet_wrap(~treatment,ncol =3)+
+  theme_bw()+
+  guides(color = guide_legend(override.aes = list(size = 5), ncol = 1))+
+  theme(legend.position = "right", aspect.ratio = 1/1,
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill ="white"),
+        panel.border = element_rect(colour = "white", fill=NA, size=0.5),
+        strip.text = element_text(size = 14, face ="bold"),              # to label add individual box
+        strip.background =element_rect(fill="white"),                    # to color individual box
+        axis.text.x = element_text(face="bold", color="black",size=14, angle = 0,vjust = 0.1), 
+        # to label x-axis tics/number labels
+        axis.text.y = element_text(face="bold", color="black",size=14),  # to label y-axis tics/number labels
+        axis.title.x=element_blank(),                                    # to label/remove x-axis labels
+        axis.title.y=element_blank(),                                    # to label/remove y-axis labels
+        axis.ticks = element_blank())
+dev.off()
+
+png("C:/Users/jadamik/Box/Juraj Adamik/09-021_FCM_Data_Analysis/JAFCM107_Figures_112921/tSNE/tSNE_1_Immune_PURO.png", 
+    height=3, width=6, units="in", res=600)
+tSNE_TABLE_CLinical_Quant[sample(nrow(tSNE_TABLE_CLinical_Quant), 150000), ] %>% 
+  #sample_n(size = 10000, replace = T) %>%
+  ggplot(aes(y = tSNE_3, x = tSNE_4, color = PURO_quantile)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  scale_color_manual(values = c("red","tomato","dodgerblue","navy"))+
+  theme_bw()+
+  guides(color = guide_legend(override.aes = list(size = 5), ncol = 1))+
+  theme(legend.position = "right", aspect.ratio = 1/1,
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill ="white"),
+        panel.border = element_rect(colour = "white", fill=NA, size=0.5),
+        strip.text = element_text(size = 14, face ="bold"),              # to label add individual box
+        strip.background =element_rect(fill="white"),                    # to color individual box
+        axis.text.x = element_text(face="bold", color="black",size=14, angle = 0,vjust = 0.1), 
+        # to label x-axis tics/number labels
+        axis.text.y = element_text(face="bold", color="black",size=14),  # to label y-axis tics/number labels
+        axis.title.x=element_blank(),                                    # to label/remove x-axis labels
+        axis.title.y=element_blank(),                                    # to label/remove y-axis labels
+        axis.ticks = element_blank())
+dev.off()
+
+
+png("C:/Users/jadamik/Box/Juraj Adamik/09-021_FCM_Data_Analysis/JAFCM107_Figures_112921/tSNE/tSNE_1_Immune_PURO_1.png", 
+    height=3, width=6, units="in", res=600)
+tSNE_TABLE_CLinical_Quant[sample(nrow(tSNE_TABLE_CLinical_Quant), 150000), ] %>% 
+  #sample_n(size = 10000, replace = T) %>%
+  ggplot(aes(y = tSNE_3, x = tSNE_4, color = PURO_quantile)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  scale_color_manual(values = c("red","grey85","grey85","navy"))+
+  theme_bw()+
+  guides(color = guide_legend(override.aes = list(size = 5), ncol = 1))+
+  theme(legend.position = "right", aspect.ratio = 1/1,
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill ="white"),
+        panel.border = element_rect(colour = "white", fill=NA, size=0.5),
+        strip.text = element_text(size = 14, face ="bold"),              # to label add individual box
+        strip.background =element_rect(fill="white"),                    # to color individual box
+        axis.text.x = element_text(face="bold", color="black",size=14, angle = 0,vjust = 0.1), 
+        # to label x-axis tics/number labels
+        axis.text.y = element_text(face="bold", color="black",size=14),  # to label y-axis tics/number labels
+        axis.title.x=element_blank(),                                    # to label/remove x-axis labels
+        axis.title.y=element_blank(),                                    # to label/remove y-axis labels
+        axis.ticks = element_blank())
+dev.off()
+
+png("C:/Users/jadamik/Box/Juraj Adamik/09-021_FCM_Data_Analysis/JAFCM107_Figures_112921/tSNE/tSNE_1_Immune_PURO_C.png", 
+    height=3, width=6, units="in", res=600)
+tSNE_TABLE_CLinical_NORM[sample(nrow(tSNE_TABLE_CLinical_NORM), 150000), ] %>% 
+  #sample_n(size = 10000, replace = T) %>%
+  ggplot(aes(y = tSNE_3, x = tSNE_4, color = `Alexa Fluor 488-A (Puromycin)`)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  scale_color_jcolors_contin("rainbow", reverse = T)+
+  #scale_color_viridis(option = "plasma")+   
+  theme_bw()+
+  guides(color = guide_legend(override.aes = list(size = 5), ncol = 1))+
+  theme(legend.position = "right", aspect.ratio = 1/1,
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill ="white"),
+        panel.border = element_rect(colour = "white", fill=NA, size=0.5),
+        strip.text = element_text(size = 14, face ="bold"),              # to label add individual box
+        strip.background =element_rect(fill="white"),                    # to color individual box
+        axis.text.x = element_text(face="bold", color="black",size=14, angle = 0,vjust = 0.1), 
+        # to label x-axis tics/number labels
+        axis.text.y = element_text(face="bold", color="black",size=14),  # to label y-axis tics/number labels
+        axis.title.x=element_blank(),                                    # to label/remove x-axis labels
+        axis.title.y=element_blank(),                                    # to label/remove y-axis labels
+        axis.ticks = element_blank())
+dev.off()
+
+
+# Split Graph
+png("C:/Users/jadamik/Box/Juraj Adamik/09-021_FCM_Data_Analysis/JAFCM107_Figures_112921/tSNE/tSNE_1_Immune_Split.png", 
+    height=5, width=7, units="in", res=600)
+
+tSNE_TABLE_CLinical[sample(nrow(tSNE_TABLE_CLinical), 150000), ] %>% 
+  #sample_n(size = 10000, replace = T) %>%
+  ggplot(aes(y = tSNE_3, x = tSNE_4, color = Population)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  #scale_color_manual(values = c("tomato","purple","dodgerblue","grey60"))+
+  facet_wrap(~Population,nrow = 3)+
+  theme_bw()+
+  guides(color = guide_legend(override.aes = list(size = 5), ncol = 1))+
+  theme(legend.position = "right", aspect.ratio = 1/1,
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill ="white"),
+        panel.border = element_rect(colour = "white", fill=NA, size=0.5),
+        strip.text = element_text(size = 10, face ="bold"),              # to label add individual box
+        strip.background =element_rect(fill="white",colour = "white"),                    # to color individual box
+        axis.text.x = element_text(face="bold", color="black",size=10, angle = 0,vjust = 0.1), 
+        # to label x-axis tics/number labels
+        axis.text.y = element_text(face="bold", color="black",size=10),  # to label y-axis tics/number labels
+        axis.title.x=element_blank(),                                    # to label/remove x-axis labels
+        axis.title.y=element_blank(),                                    # to label/remove y-axis labels
+        axis.ticks = element_blank())
+dev.off()
+
+# Split Graph Lineage Outcome
+png("C:/Users/jadamik/Box/Juraj Adamik/09-021_FCM_Data_Analysis/JAFCM107_Figures_112921/tSNE/tSNE_1_Immune_Split_OUT1.png", 
+    height=5, width=7, units="in", res=600)
+
+tSNE_TABLE_CLinical[sample(nrow(tSNE_TABLE_CLinical), 150000), ] %>% 
+  #filter(Sequence_Number != "HD1.2") %>%
+  ggplot(aes(y = tSNE_3, x = tSNE_4, color = Outcome.1)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  scale_color_manual(values=c("magenta","red","green","grey45","blue","grey45"))+  
+  facet_wrap(~Population,nrow = 3)+
+  theme_bw()+
+  guides(color = guide_legend(override.aes = list(size = 5), ncol = 1))+
+  theme(legend.position = "right", aspect.ratio = 1/1,
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill ="white"),
+        panel.border = element_rect(colour = "white", fill=NA, size=0.5),
+        strip.text = element_text(size = 10, face ="bold"),              # to label add individual box
+        strip.background =element_rect(fill="white",colour = "white"),                    # to color individual box
+        axis.text.x = element_text(face="bold", color="black",size=10, angle = 0,vjust = 0.1), 
+        # to label x-axis tics/number labels
+        axis.text.y = element_text(face="bold", color="black",size=10),  # to label y-axis tics/number labels
+        axis.title.x=element_blank(),                                    # to label/remove x-axis labels
+        axis.title.y=element_blank(),                                    # to label/remove y-axis labels
+        axis.ticks = element_blank())
+dev.off()
+
+png("C:/Users/jadamik/Box/Juraj Adamik/09-021_FCM_Data_Analysis/JAFCM107_Figures_112921/tSNE/tSNE_1_Immune_Split_PURO.png", 
+    height=5, width=7, units="in", res=600)
+tSNE_TABLE_CLinical_Quant[sample(nrow(tSNE_TABLE_CLinical_Quant), 150000), ] %>% 
+  #sample_n(size = 10000, replace = T) %>%
+  ggplot(aes(y = tSNE_3, x = tSNE_4, color = PURO_quantile)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  scale_color_manual(values = c("red","grey85","grey85","navy"))+
+  facet_wrap(~Population,nrow = 3)+
+  theme_bw()+
+  guides(color = guide_legend(override.aes = list(size = 5), ncol = 1))+
+  theme(legend.position = "right", aspect.ratio = 1/1,
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill ="white"),
+        panel.border = element_rect(colour = "white", fill=NA, size=0.5),
+        strip.text = element_text(size = 10, face ="bold"),              # to label add individual box
+        strip.background =element_rect(fill="white",colour = "white"),                    # to color individual box
+        axis.text.x = element_text(face="bold", color="black",size=10, angle = 0,vjust = 0.1), 
+        # to label x-axis tics/number labels
+        axis.text.y = element_text(face="bold", color="black",size=10),  # to label y-axis tics/number labels
+        axis.title.x=element_blank(),                                    # to label/remove x-axis labels
+        axis.title.y=element_blank(),                                    # to label/remove y-axis labels
+        axis.ticks = element_blank())
+dev.off()
+
+
+##########################################################################################################################
+##########################################################################################################################
+```
+
+

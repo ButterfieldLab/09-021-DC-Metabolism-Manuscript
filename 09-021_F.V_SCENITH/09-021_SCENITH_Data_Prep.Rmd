@@ -1,0 +1,746 @@
+---
+title: "R Cytek Aurora Data JAFCM108"
+output: html_notebook
+date: "2022-11-03"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+ # load functions library
+```{r}
+library(easypackages)
+packages(c("dplyr", "broom", "ggrastr", "ggrepel",
+           "tidyverse", "patchwork", "broom", "effsize","fst","ggplot2","gdata","rstatix","limma",
+           #"Rtsne",
+           #"FlowSOM",
+           #"plyr",
+           "doBy",
+           "reshape2",
+           "devtools",
+           "scico",
+           "readr",
+           "magrittr",
+           "uwot",
+           "readxl",
+           "ggridges",
+           "ggbeeswarm",
+           "viridis",
+           "RColorBrewer",
+           "lme4",
+           "ComplexHeatmap","gridBase","circlize","dendextend","heatmaply","ggpubr","corrr", "survminer", "survival"))
+```
+
+# LOADING & CLEANING DATA JAFCM108
+```{r Read in Tables and combine clinical data sets}
+# First Part of loading cleaning and combining tables 
+################################
+# to avoid conflicts
+filter <- dplyr::filter
+summarize <-  dplyr::summarize
+
+# Set directories
+getwd()
+list.files(path="../Fraction_V_DFs")
+
+# read in tables
+#--------------------------#
+# Load in Patient Data Table
+FCM108_DF <- read_csv("../Fraction_V_DFs/Fr.V_JAFCM108_Gated_Data_Table_031122.csv")
+glimpse(FCM108_DF)
+
+FCM108_DF %>% 
+  mutate_if(is.character,as.factor)->
+  FCM108_DF
+glimpse(FCM108_DF)
+# to take out unstained samples
+FCM108_DF %>% filter(is.na(reagent))
+FCM108_DF <- FCM108_DF %>% filter(!is.na(reagent))
+
+dim(FCM108_DF)
+unique(FCM108_DF$reagent)
+
+# Load in Heathy Donor Data Table
+FCM108_HD <- read_csv("../Fraction_V_DFs/Main_Gating_PBMC_HD_031122.csv")
+glimpse(FCM108_HD)
+
+FCM108_HD %>% 
+  mutate_if(is.character,as.factor)->
+  FCM108_HD
+glimpse(FCM108_HD)
+dim(FCM108_HD)
+unique(FCM108_HD$reagent)
+
+# to check for non-overasping elements
+unique(FCM108_HD$reagent) %in% unique(FCM108_DF$reagent)
+setdiff(unique(FCM108_HD$reagent) , unique(FCM108_DF$reagent))
+
+# WATCH OUT: finds the non-overlapping elements only if these elements are contained in the object that is used as the first argument!. 
+# so use:
+c(setdiff(unique(FCM108_HD$reagent) , unique(FCM108_DF$reagent)), setdiff(unique(FCM108_DF$reagent) , unique(FCM108_HD$reagent)))
+
+# here I recode markers containing "-" so it is not a problem
+FCM108_DF <- FCM108_DF %>% 
+  dplyr::mutate(reagent = dplyr::recode(reagent, 
+                                           "HLADR" = "HLA-DR",
+                                           "PDL1" = "PD-L1"))
+
+# now there should be no difference
+c(setdiff(unique(FCM108_HD$reagent) , unique(FCM108_DF$reagent)), setdiff(unique(FCM108_DF$reagent) , unique(FCM108_HD$reagent)))
+
+#check if the colnames are equal for future cbind / matching of tables
+colnames(FCM108_DF) == colnames(FCM108_HD)
+
+###
+### check if Population names match
+unique(FCM108_HD$population) == unique(FCM108_HD$population)
+
+JAFCM108_Main <- rbind(FCM108_DF,FCM108_HD)   # combine the 2 data frames
+JAFCM108_Main %>% pull(population)
+glimpse(JAFCM108_Main)
+unique(JAFCM108_Main$filename)
+unique(JAFCM108_Main$filename)
+
+FCM108_DF_s <- JAFCM108_Main %>% separate(filename, c('Patient', 'Info')) %>% select(-Info) %>%    # I split column 'filename' into 'Patient', 'Info'
+  filter(Patient != "Unstained") # remove unstained row
+unique(FCM108_DF_s$Patient)
+
+
+
+FCM108_DF_s <- FCM108_DF_s %>% 
+  dplyr::mutate(population = dplyr::recode(population, 
+                                           "preDCs" = "pre-DCs",
+                                           "pDC_from_pre" = "pDC",
+                                           "CD5pos_cDC2s" = "CD5+cDC2s", 
+                                           "CD5neg_cDC2s" = "CD5-cDC2s",
+                                           "CD14pos_DC3s" = "CD14+DC3s",
+                                           "CD14neg_DC3s" = "CD14-DC3s"))
+
+
+FCM108_DF_s$Patient %>%  unique()
+
+FCM108_DF_MFI <- FCM108_DF_s %>% 
+  mutate(Patient_Number = ifelse(grepl("Pt",FCM108_DF_s$Patient), str_extract(FCM108_DF_s$Patient, "[0-9]+"),FCM108_DF_s$Patient))
+
+
+FCM108_DF_MFI.S <- FCM108_DF_MFI %>% select(population,Patient_Number,Treatment, reagent, median:percent) %>%  mutate(Patient_Number = as.factor(Patient_Number)) 
+
+FCM108_DF_MFI.S$Patient_Population <- paste(FCM108_DF_MFI.S$Patient_Number,FCM108_DF_MFI.S$population, sep = "_")
+
+
+# FCM108_DF_s %>% mutate(Patient_Number = case_when(
+#   grepl("CPL-..-*.\\D", sample_id) ~ str_extract(Patient, "..-*."),
+# 
+#   grepl("CPL-..-*..", sample_id) ~ str_extract(Patient, "CPL-..-*.."),
+#     
+#   grepl("HD.", sample_id) ~ str_extract(sample_id, "HD."),
+#   TRUE ~ "Monocyte")) 
+
+##########################--------------------------------------------------------------------------------------
+```
+
+### Set Population Colors
+```{r}
+##########################
+# Set some graphing parameters
+my_populations_cols =  c("cMo" = "#F8766D",
+             "iMo" = "#DB8E00",
+             "ncMo" = "#AEA200",
+             "pDC" = "#64B200",
+             "pre-DCs" = "#00BD5C",
+             "cDC1s" = "#FFea05",
+             "CD5+cDC2s" = "#00BADE",
+             "CD5-cDC2s" = "#00A6FF",
+             "CD14+DC3s" = "#B385FF",
+             "CD14-DC3s" = "#EF67EB")
+```
+
+
+# Load prep 09_021_Clinl_Final.Table_06122022.csv
+```{r}
+read.csv("../Fraction_V_DFs/09_021_Clinl_Final.Table_06122022.csv") %>% 
+    dplyr::mutate(Sequence_Number = as.factor(Sequence_Number))  ->
+  Clinical_DF
+
+Clinical_DF %<>%  rename("Patient_Number" = "Sequence_Number")
+glimpse(Clinical_DF)
+
+FV_108.Clincal <- left_join(FCM108_DF_MFI.S, Clinical_DF, by  = "Patient_Number")
+
+FV_108.Clincal %<>% dplyr::mutate_at(vars(Response:Outcome), ~ if_else(is.na(.), 'HD', .))
+FV_108.Clincal %>%  filter(grepl(pattern = "HD", Response))
+
+
+dput(as.character(unique(FV_108.Clincal$population)))
+FV_108.Clincal$population <- factor(FV_108.Clincal$population, levels = c("cMo", "iMo", "ncMo", "CD123+ DCs", "pDC", "pre-DCs", "cDC1s",
+ "CD5+cDC2s","CD5-", "CD5-cDC2s", "CD14-DC3s", "CD14+DC3s"))
+
+FV_108.Clincal %>%  filter(population == "CD5-")
+# not sure about having the CD5- there
+
+# png("/Users/jadamik/Documents/Butterfield_Lab/JAFCM108/Figures_108/Pop.Frequencies_SD.png", 
+#     height=10, width=12, units="in", res=600)
+FV_108.Clincal %>% group_by(Patient_Number,Outcome, Response, population) %>%  
+  summarise(mean = mean(percent,na.rm = TRUE),
+            sd = sd(percent,na.rm = TRUE)) %>% 
+  #filter(population %in% c("cMo","iMo", "ncMo")) %>% 
+  ggplot(aes(x=Patient_Number, y=mean, fill=population))+
+  geom_bar(stat="identity", color="black",linewidth=0.25,
+           position=position_dodge()) +
+  geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width=.2,size=0.5,
+                position=position_dodge(.9))+
+  scale_fill_manual(values=c(my_populations_cols))+  
+   facet_wrap(~population , nrow = 3, scales = "free",strip.position="top")+
+ theme(
+    legend.position = "right", aspect.ratio = 1/1.25,
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(size = 13, face ="bold"),              # to label add individual box
+    strip.background =element_blank(), 
+    panel.border = element_rect(colour = "black", fill=NA, size=0.5),
+    # to color individual box
+    axis.text.x = element_text(face="bold", color="black",size=5, vjust = 0.2,angle = 90),
+    # to label x-axis tics/number labels
+    axis.text.y = element_text(face="plain", color="black",size=14),  # to label y-axis tics/number labels
+    axis.title.x= element_blank(),                                    # to label/remove x-axis labels
+    axis.title.y= element_text(face="plain", color="black",size=14),    # to label/remove y-axis labels
+    axis.ticks = element_line(colour = "black", size = 1))
+#dev.off()
+
+```
+
+# ***** Metabolic section 
+# ------------------------------------
+# Puromycin Metabolic Calculations
+```{r}
+glimpse(FV_108.Clincal)
+
+Data_108_Spread <- FV_108.Clincal %>% select(Patient_Population,population,Patient_Number:median, percent,Patient_CPL_Code:PFS_ind) %>% # spread table
+  spread(reagent, median, fill = NA, convert = FALSE)
+
+library(janitor)  # we can use janitor package to check out duplicated rows in column
+Data_108_Spread %>% filter(Treatment == "CTRL") %>% get_dupes(Patient_Population)  #
+# another way to check it is using: duplicated(Data_Puro$Patient_Population)
+Data_Puro_Spread_108 <- Data_108_Spread %>% select(Patient_Population,Treatment,Puromycin) %>% 
+  spread(Treatment, Puromycin, fill = NA, convert = FALSE)
+
+head(Data_Puro_Spread_108)
+
+MFI_Metabolic_Clin_NA <- Data_Puro_Spread_108 %>% 
+  mutate(Glucose_Dep = (CTRL-`2DG`)/(CTRL-Z)*100) %>% 
+  mutate(Mito_Dep = (CTRL-O)/(CTRL-Z)*100) %>% 
+  mutate(Glyco_Cap = 100-Mito_Dep) %>% 
+  mutate(FAAO = 100-Glucose_Dep) %>% 
+  mutate(FAO_Dep = (CTRL-ETO)/(CTRL-Z)*100) %>% 
+  mutate(Glnlysis_Dep = (CTRL-TELE)/(CTRL-Z)*100)
+```
+
+# Metabolic Normalization & Outliar Removal
+```{r}
+# MFI_Metabolic_Clin_NA %>% filter(FAAO < 150) %>% 
+#   ggplot(aes(x = Patient_Population,y = FAAO)) + 
+#   geom_col()
+###################################
+
+#######################
+### EXPLORING METABOLIC OUTLIARS  
+#######################
+# here we can nicely replace high outlier values (anything after indicated number) with NA
+MFI_Metabolic_Clin_NA %>% select(Glucose_Dep:Glnlysis_Dep) %>% summary()
+
+# Glucose Dependence
+MFI_Metabolic_Clin_NA$Glucose_Dep[MFI_Metabolic_Clin_NA$Glucose_Dep > 100] <- NA
+MFI_Metabolic_Clin_NA$Glucose_Dep[MFI_Metabolic_Clin_NA$Glucose_Dep < -50] <- NA
+MFI_Metabolic_Clin_NA$Glucose_Dep[MFI_Metabolic_Clin_NA$Glucose_Dep <= -0] <- 0
+
+# Mitochondrial Dependence
+MFI_Metabolic_Clin_NA$Mito_Dep[MFI_Metabolic_Clin_NA$Mito_Dep > 1000] <- NA
+MFI_Metabolic_Clin_NA$Mito_Dep[MFI_Metabolic_Clin_NA$Mito_Dep < -50] <- NA
+MFI_Metabolic_Clin_NA$Mito_Dep[MFI_Metabolic_Clin_NA$Mito_Dep <= 0] <- 0
+
+# Glycolytic Capacity
+MFI_Metabolic_Clin_NA$Glyco_Cap[MFI_Metabolic_Clin_NA$Glyco_Cap < -5000] <- NA
+MFI_Metabolic_Clin_NA$Glyco_Cap[MFI_Metabolic_Clin_NA$Glyco_Cap <= 0] <- 0
+MFI_Metabolic_Clin_NA$Glyco_Cap[MFI_Metabolic_Clin_NA$Glyco_Cap > 150] <- NA
+
+# FAAO Capacity
+MFI_Metabolic_Clin_NA$FAAO[MFI_Metabolic_Clin_NA$FAAO < -50] <- NA
+MFI_Metabolic_Clin_NA$FAAO[MFI_Metabolic_Clin_NA$FAAO > 150] <- NA
+
+# FAO Dependence
+MFI_Metabolic_Clin_NA$FAO_Dep[MFI_Metabolic_Clin_NA$FAO_Dep > 50] <- NA
+MFI_Metabolic_Clin_NA$FAO_Dep[MFI_Metabolic_Clin_NA$FAO_Dep < -100] <- NA
+
+# Glnlysis Dependence
+MFI_Metabolic_Clin_NA$Glnlysis_Dep[MFI_Metabolic_Clin_NA$Glnlysis_Dep > 80] <- NA
+MFI_Metabolic_Clin_NA$Glnlysis_Dep[MFI_Metabolic_Clin_NA$Glnlysis_Dep < -100] <- NA
+
+
+MFI_Metabolic_Clin_NA %<>% left_join(FV_108.Clincal %>% group_by(Patient_Population) %>%  filter(row_number() == 1) %>%
+                                       select(Patient_Population,population,Patient_Number,Patient_CPL_Code:PFS_ind), by = "Patient_Population") %>%
+  arrange(Patient_Number)
+
+MFI_Metabolic_Clin_NA
+
+# Set Leveles
+MFI_Metabolic_Clin_NA$population <- factor(MFI_Metabolic_Clin_NA$population, levels=c("cMo", "iMo", "ncMo", 
+                                                                                  "pDC",  "pre-DCs", "cDC1s", "CD5+cDC2s", 
+                                                                                  "CD5-cDC2s","CD14+DC3s", "CD14-DC3s"))
+MFI_Metabolic_Clin_NA$Response <- factor(MFI_Metabolic_Clin_NA$Response, levels=c("HD","PR","SD","NED1","NED2","PD"))
+MFI_Metabolic_Clin_NA$Outcome <- factor(MFI_Metabolic_Clin_NA$Outcome, levels=c("HD","Good","Bad"))
+MFI_Metabolic_Clin_NA$Outcome.1 <- factor(MFI_Metabolic_Clin_NA$Outcome.1, levels=c("HD","Good","Stable","Bad"))
+
+# Check Things
+########################
+MFI_Metabolic_Clin_NA %>% ggplot(aes(x = Glucose_Dep)) + geom_histogram()
+MFI_Metabolic_Clin_NA %<>%  mutate(FAO_Dep.1 = FAO_Dep + 50,
+                                  Glnlysis_Dep.1 = Glnlysis_Dep + 50)
+```
+#-----------------------------------------
+# Merging JAFCM107 MFIs with JAFCM108
+```{r}
+FCM108_DF_MFI.S.wide <- FCM108_DF_MFI.S  %>%  pivot_wider(names_from = reagent, values_from = median) %>% 
+  group_by(Patient_Number,population) %>% 
+  summarise(across(c(Puromycin:CD36), ~max(.x, na.rm = TRUE)))   %>%  ungroup()
+
+FCM108_DF_MFI.S.wide$Patient_Population <- paste(FCM108_DF_MFI.S.wide$Patient_Number,FCM108_DF_MFI.S.wide$population, sep = "_")
+
+
+setdiff(c(FCM108_DF_MFI.S.wide$population %>%  unique()), c(FCM108_DF_MFI.S.wide$population %>%  unique()))
+
+count = 0
+for (Person_sample in unique(FV_107.Final$Patient_Population)) {
+  if (!Person_sample %in% FCM108_DF_MFI.S.wide$Patient_Population) {
+    count = count + 1
+  }
+}
+
+if (count > 0) {
+  print("ERROR: There are missing samples in the JAFCM107 Data!")
+} else {
+  print("SUCCESS: There are no missing samples in the JAFCM108 Data")
+}
+
+glimpse(FV_107.Final)
+glimpse(FCM108_DF_MFI.S.wide)
+
+
+FCM108_Selected<- FCM108_DF_MFI.S.wide %>%  select(Patient_Population,Puromycin,CD36,CADM1,`PD-L1`,CD301)
+
+FCM_09021_Final <- left_join(FV_107.Final %>%  select(-Puromycin,-CADM1,-`PD-L1`,-CD301), FCM108_Selected   , by = "Patient_Population") 
+
+FCM_09021_Final %<>%  select(Outcome:population,Patient_Population,Puromycin,CD88_89:CD301)
+FCM_09021_Final %>% ggplot(aes(x = CD301)) + geom_histogram()
+
+###########################
+###########################
+FCM_09021_Final.Metabolic <- left_join(FCM_09021_Final,MFI_Metabolic_Clin_NA %>% 
+                                         select(Patient_Population:Glnlysis_Dep,FAO_Dep.1 ,Glnlysis_Dep.1,Response,PF_Survival:PFS_ind), by = "Patient_Population")
+FCM_09021_Final.Metabolic %<>%  mutate(Outcome.1 = as.factor(Outcome.1))
+FCM_09021_Final.Metabolic$Outcome.1 <- factor(FCM_09021_Final.Metabolic$Outcome.1, levels=c("HD","Good","Stable","Bad"))
+
+###########################
+###########################
+FCM_09021_Final.Metabolic$CD36[FCM_09021_Final.Metabolic$CD36 > 20000] <- NA
+```
+### FCM_09021_Final.Metabolic
+#-----------------------------
+#=============================
+
+# FREQUENCY population data
+```{r}
+##########################--------------------------------------------------------------------------------------
+##########################--------------------------------------------------------------------------------------
+
+# really neat way of printing out (but can't save it into a vector) population names from a column into a vector-output in console
+pops <- as.vector(unique(FV_108.Clincal$population))
+dput(as.character(pops))
+# # # # # # # # # # # # # # # 
+Data_Markers <- Table_FCM108 %>% filter(reagent != "Puromycin") # select out Metabolic parameters
+glimpse(Data_Markers)
+
+Data_Markers_Spread <- Data_Markers %>% select(Patient_Population,Patient:median, Frequency,Outcome,Outcome.1,Response) %>% # spread table
+  spread(reagent, median, fill = NA, convert = FALSE)
+
+Data_Markers_Spread$population <- factor(Data_Markers_Spread$population, levels=c("cMo", "iMo", "ncMo", 
+                                                                                  "pDC",  "preDCs", "cDC1s", "CD5+cDC2s", 
+                                                                                   "CD5-cDC2s","CD14+DC3s", "CD14-DC3s"))
+Data_Markers_Spread$Response <- factor(Data_Markers_Spread$Response, levels=c("HD","PR","SD","NED1","NED2","PD"))
+Data_Markers_Spread$Outcome <- factor(Data_Markers_Spread$Outcome, levels=c("HD","Good","Bad"))
+
+#######################
+### using ifelse statememnt I am replacing selected iMo with Frequency < 0.5 to become NAs
+# again it is mainly the problematic pt 24
+#######################
+Data_Markers_Spread %>% mutate(Frequency_1 = ifelse(population == 'iMo' & Frequency < 0.5, NA, Frequency)) %>% 
+  filter(population == "iMo") %>% 
+  ggplot(aes(x = Patient,y = Frequency_1)) + 
+  geom_point()+
+  geom_hline(yintercept = c(0.5),col="black", lwd = 1, linetype="dashed", alpha=1)
+
+Data_Markers_Spread %>% mutate(Frequency_1 = ifelse(population == 'pDC' & Frequency < 60, NA, Frequency)) %>% 
+  filter(population == "pDC") %>% 
+  ggplot(aes(x = Patient,y = Frequency_1)) + 
+  geom_point()+
+  geom_hline(yintercept = c(60),col="black", lwd = 1, linetype="dashed", alpha=1)
+
+Data_Markers_Spread %>% mutate(Frequency_1 = ifelse(population == 'preDCs' & Frequency > 35, NA, Frequency)) %>% 
+  filter(population == "preDCs") %>% 
+  ggplot(aes(x = Patient,y = Frequency_1)) + 
+  geom_point()+
+  geom_hline(yintercept = c(35),col="black", lwd = 1, linetype="dashed", alpha=1)
+
+Data_Markers_Spread %>% mutate(Frequency_1 = ifelse(population == 'CD5+cDC2s' & Frequency > 50, NA, Frequency)) %>% 
+  filter(population == "CD5+cDC2s") %>% 
+  ggplot(aes(x = Patient,y = Frequency_1)) + 
+  geom_point()+
+  geom_hline(yintercept = c(50),col="black", lwd = 1, linetype="dashed", alpha=1)
+
+Data_Markers_Spread %>% mutate(Frequency_1 = ifelse(population == 'CD5-cDC2s' & Frequency > 57, NA, Frequency)) %>% 
+  filter(population == "CD5-cDC2s") %>% 
+  ggplot(aes(x = Patient,y = Frequency_1)) + 
+  geom_point()+
+  geom_hline(yintercept = c(57),col="black", lwd = 1, linetype="dashed", alpha=1)
+
+Data_Markers_Spread %>% #mutate(Frequency_1 = ifelse(population == 'CD14+DC3s' & Frequency < 15, NA, Frequency)) %>% 
+  filter(population == "CD14+DC3s") %>% 
+  ggplot(aes(x = Patient,y = Frequency)) + 
+  geom_point()+
+  geom_hline(yintercept = c(15),col="black", lwd = 1, linetype="dashed", alpha=1)
+#######################
+Data_Markers_Spread <- Data_Markers_Spread %>% 
+  mutate(Frequency = ifelse(population == 'iMo' & Frequency < 0.5, NA, Frequency)) %>% 
+  mutate(Frequency = ifelse(population == 'pDC' & Frequency < 60, NA, Frequency)) %>% 
+  mutate(Frequency = ifelse(population == 'preDCs' & Frequency > 35, NA, Frequency)) %>% 
+  mutate(Frequency = ifelse(population == 'CD5+cDC2s' & Frequency > 50, NA, Frequency)) %>% 
+  mutate(Frequency = ifelse(population == 'CD5-cDC2s' & Frequency > 57, NA, Frequency)) %>% 
+  mutate(Frequency = ifelse(population == 'CD14+DC3s' & Frequency < 15, NA, Frequency)) %>% 
+  mutate(Frequency = ifelse(population == 'CD14+DC3s' & Frequency < 15, NA, Frequency))
+  
+# graphing things 
+Data_Markers_Spread %>% #mutate(Frequency_1 = ifelse(population == 'pDC' & Frequency < 60, NA, Frequency)) %>%
+  filter(population == "preDCs") %>% 
+  ggplot(aes(x = Patient,y = Frequency)) + 
+  geom_point()+
+  geom_hline(yintercept = c(35),col="black", lwd = 1, linetype="dashed", alpha=1)
+
+# Plotting overall Frequencies with SD from replicate data (from different treatments)
+##########################
+png("/Users/jadamik/Documents/Butterfield_Lab/JAFCM108/Figures_108/Frequencies_SD.png", 
+    height=10, width=12, units="in", res=600)
+Data_Markers_Spread %>% group_by(Patient,Outcome, Response,population,Patient_Population) %>%  
+  summarise(mean = mean(Frequency,na.rm = TRUE),
+            sd = sd(Frequency,na.rm = TRUE)) %>% 
+  #filter(population %in% c("cMo","iMo", "ncMo")) %>% 
+  ggplot(aes(x=Patient, y=mean, fill=population))+
+  geom_bar(stat="identity", color="black",size=0.25,
+           position=position_dodge()) +
+  geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width=.2,size=0.5,
+                position=position_dodge(.9))+
+  scale_fill_manual(values=c(my_cols))+  
+   facet_wrap(~population , nrow = 3, scales = "free",strip.position="top")+
+ theme(
+    legend.position = "right", aspect.ratio = 1/1.25,
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(size = 13, face ="bold"),              # to label add individual box
+    strip.background =element_blank(), 
+    panel.border = element_rect(colour = "black", fill=NA, size=0.5),
+    # to color individual box
+    axis.text.x = element_text(face="bold", color="black",size=5, vjust = 0.2,angle = 90),
+    # to label x-axis tics/number labels
+    axis.text.y = element_text(face="plain", color="black",size=14),  # to label y-axis tics/number labels
+    axis.title.x= element_blank(),                                    # to label/remove x-axis labels
+    axis.title.y= element_text(face="plain", color="black",size=14),    # to label/remove y-axis labels
+    axis.ticks = element_line(colour = "black", size = 1))
+dev.off()
+##########################
+
+# Plotting Frequency vs Outcome - Plots for each population 
+#############################################
+
+#####
+# Calculate mean of 6 frequency measurments (from different metabolic treatments)
+Average_Frequencies <- Data_Markers_Spread %>% filter(Patient != "Pt24") %>%  
+  group_by(Patient,Outcome,Outcome.1, Response,population,Patient_Population) %>%  
+  dplyr::summarise(across(where(is.numeric), ~ mean(.x, na.rm = TRUE))) %>% 
+  ungroup()
+
+levels(Data_Markers_Spread$Outcome.1)
+# Plotting with statistics
+#############################################
+# cMo
+###
+# to calculate stats
+cMo_stat <- Average_Frequencies %>%   
+  filter(population == "cMo") %>%
+  tukey_hsd(aov(Frequency ~ Outcome, data = .))
+
+png("/Users/jadamik/Documents/Butterfield_Lab/JAFCM108/Figures_108/Frequencies_cMo.png", 
+    height=3, width=3, units="in", res=600)
+Average_Frequencies %>%   
+  filter(population == "cMo") %>% 
+  ggplot(aes(x = Outcome, y =  Frequency)) + 
+  geom_point(position=position_jitterdodge(jitter.width = 0),aes(fill= Response), shape=21,color="black", size = 2, alpha = 0.85) +
+  geom_boxplot(aes(group=Outcome),size = 0.2, color= "black",alpha=0.2, outlier.colour = NA)+
+  scale_fill_manual(values=c("magenta","red","green","lightblue","blue","grey45"))+  
+  stat_pvalue_manual(cMo_stat,
+                     label = "p.adj",
+                     size=3,
+                     y.position = c(100,103,106), #step.increase = 0.1,
+                     tip.length = 0.0, vjust = 0.01)+
+  theme_classic()+ 
+  ylab("Frequency (cMo)")+
+  ylim(80,110)+
+  theme_indi
+dev.off()
+###
+# iMo
+###
+# to calculate stats
+iMo_stat <- Average_Frequencies %>%   
+  filter(population == "iMo") %>%
+  #filter(Frequency > 40) %>% 
+  tukey_hsd(aov(Frequency ~ Outcome, data = .))
+
+png("/Users/jadamik/Documents/Butterfield_Lab/JAFCM108/Figures_108/Frequencies_iMo.png", 
+    height=3, width=3, units="in", res=600)
+Average_Frequencies %>%   
+  filter(population == "iMo") %>% 
+  #filter(Patient != "Pt17") %>% 
+  ggplot(aes(x = Outcome, y =  Frequency)) + 
+  geom_point(position=position_jitterdodge(jitter.width = 0),aes(fill= Response), shape=21,color="black", size = 2, alpha = 0.85) + #library(ggbeeswarm)
+  geom_boxplot(aes(group=Outcome),size = 0.2, color= "black",alpha=0.2,outlier.colour = NA)+
+  scale_fill_manual(values=c("magenta","red","green","lightblue","blue","grey45"))+  
+  stat_pvalue_manual(iMo_stat,
+                     label = "p.adj",
+                     size=3,
+                     y.position = c(12,14,16), #step.increase = 0.1,
+                     tip.length = 0.0, vjust = 0.01)+
+  theme_classic()+ 
+  ylab("Frequency (iMo)")+
+  ylim(0,18)+
+  theme_indi
+dev.off()
+###
+# ncMo
+###
+# to calculate stats
+ncMo_stat <- Average_Frequencies %>%   
+  filter(population == "ncMo") %>%
+  #filter(Frequency > 40) %>% 
+  tukey_hsd(aov(Frequency ~ Outcome, data = .))
+
+png("/Users/jadamik/Documents/Butterfield_Lab/JAFCM108/Figures_108/Frequencies_ncMo.png", 
+    height=3, width=3, units="in", res=600)
+Average_Frequencies %>%   
+  filter(population == "ncMo") %>% 
+  ggplot(aes(x = Outcome, y =  Frequency)) + 
+  geom_point(position=position_jitterdodge(jitter.width = 0),aes(fill= Response), shape=21,color="black", size = 2, alpha = 0.85) + #library(ggbeeswarm)
+  geom_boxplot(aes(group=Outcome),size = 0.2, color= "black",alpha=0.2,outlier.colour = NA)+
+  scale_fill_manual(values=c("magenta","red","green","lightblue","blue","grey45"))+  
+  stat_pvalue_manual(ncMo_stat,
+                     label = "p.adj",
+                     size=3,
+                     y.position = c(10,12,14), #step.increase = 0.1,
+                     tip.length = 0.0, vjust = 0.01)+
+  theme_classic()+ 
+  ylab("Frequency (ncMo)")+
+  ylim(0,16)+
+  theme_indi
+dev.off()
+###
+# pDC
+###
+# to calculate stats without outliar
+pDC_stat <- Average_Frequencies %>%   
+  filter(population == "pDC") %>%
+  tukey_hsd(aov(Frequency ~ Outcome, data = .))
+
+png("/Users/jadamik/Documents/Butterfield_Lab/JAFCM108/Figures_108/Frequencies_pDC.png", 
+    height=3, width=3, units="in", res=600)
+Average_Frequencies %>%   
+  filter(population == "pDC") %>% 
+  ggplot(aes(x = Outcome, y =  Frequency)) + 
+  geom_point(position=position_jitterdodge(jitter.width = 0),aes(fill= Response), shape=21,color="black", size = 2, alpha = 0.85) + 
+  geom_boxplot(aes(group=Outcome),size = 0.2, color= "black",alpha=0.2,outlier.colour = NA)+
+  scale_fill_manual(values=c("magenta","red","green","lightblue","blue","grey45"))+  
+  stat_pvalue_manual(pDC_stat,
+                     label = "p.adj",
+                     size=3,
+                     y.position = c(100,105,110), #step.increase = 0.1,
+                     tip.length = 0.0, vjust = 0.01)+
+  theme_classic()+ 
+  ylab("Frequency (pDC)")+
+  ylim(70,115)+
+  theme_indi
+dev.off()
+###
+# preDC
+###
+# to calculate stats without outliar
+preDC_stat <- Average_Frequencies %>%   
+  filter(population == "preDCs") %>%
+  tukey_hsd(aov(Frequency ~ Outcome, data = .))
+
+png("/Users/jadamik/Documents/Butterfield_Lab/JAFCM108/Figures_108/Frequencies_preDCs.png", 
+    height=3, width=3, units="in", res=600)
+Average_Frequencies %>%   
+  filter(population == "preDCs") %>% 
+  ggplot(aes(x = Outcome, y =  Frequency)) + 
+  geom_point(position=position_jitterdodge(jitter.width = 0),aes(fill= Response), shape=21,color="black", size = 2, alpha = 0.85) + 
+  geom_boxplot(aes(group=Outcome),size = 0.2, color= "black",alpha=0.2,outlier.colour = NA)+
+  scale_fill_manual(values=c("magenta","red","green","lightblue","blue","grey45"))+  
+  stat_pvalue_manual(preDC_stat,
+                     label = "p.adj",
+                     size=3,
+                     y.position = c(27,31,35), #step.increase = 0.1,
+                     tip.length = 0.0, vjust = 0.01)+
+  theme_classic()+ 
+  ylab("Frequency (preDCs)")+
+  ylim(0,38)+
+  theme_indi
+dev.off()
+###
+# cDC1s
+###
+# to calculate stats without outliar
+cDC1s_stat <- Average_Frequencies %>%   
+  filter(population == "cDC1s") %>%
+  tukey_hsd(aov(Frequency ~ Outcome, data = .))
+
+png("/Users/jadamik/Documents/Butterfield_Lab/JAFCM108/Figures_108/Frequencies_cDC1s.png", 
+    height=3, width=3, units="in", res=600)
+Average_Frequencies %>%   
+  filter(population == "cDC1s") %>% 
+  ggplot(aes(x = Outcome, y =  Frequency)) + 
+  geom_point(position=position_jitterdodge(jitter.width = 0),aes(fill= Response), shape=21,color="black", size = 2, alpha = 0.85) + #library(ggbeeswarm)
+  geom_boxplot(aes(group=Outcome),size = 0.2, color= "black",alpha=0.2,outlier.colour = NA)+
+  scale_fill_manual(values=c("magenta","red","green","lightblue","blue","grey45"))+  
+  stat_pvalue_manual(cDC1s_stat,
+                     label = "p.adj",
+                     size=3,
+                     y.position = c(8,9,10), #step.increase = 0.1,
+                     tip.length = 0.0, vjust = 0.01)+
+  theme_classic()+ 
+  ylab("Frequency (cDC1s)")+
+  ylim(0,11)+
+  theme_indi
+dev.off()
+###
+# CD5+cDC2s
+###
+# to calculate stats without outliar
+CD5pos_cDC2s_stat <- Average_Frequencies %>%   
+  filter(population == "CD5+cDC2s") %>%
+  tukey_hsd(aov(Frequency ~ Outcome, data = .))
+
+png("/Users/jadamik/Documents/Butterfield_Lab/JAFCM108/Figures_108/Frequencies_CD5pos_cDC2s.png", 
+    height=3, width=3, units="in", res=600)
+Average_Frequencies %>%   
+  filter(population == "CD5+cDC2s") %>% 
+  ggplot(aes(x = Outcome, y =  Frequency)) + 
+  geom_point(position=position_jitterdodge(jitter.width = 0),aes(fill= Response), shape=21,color="black", size = 2, alpha = 0.85) + #library(ggbeeswarm)
+  geom_boxplot(aes(group=Outcome),size = 0.2, color= "black",alpha=0.2,outlier.colour = NA)+
+  scale_fill_manual(values=c("magenta","red","green","lightblue","blue","grey45"))+  
+  stat_pvalue_manual(CD5pos_cDC2s_stat,
+                     label = "p.adj",
+                     size=3,
+                     y.position = c(36,40,44), #step.increase = 0.1,
+                     tip.length = 0.0, vjust = 0.01)+
+  theme_classic()+ 
+  ylab("Frequency (CD5+cDC2s)")+
+  ylim(5,45)+
+  theme_indi
+dev.off()
+###
+# CD5-cDC2s
+###
+CD5neg_cDC2s_stat <- Average_Frequencies %>%   
+  filter(population == "CD5-cDC2s") %>%
+ # filter(Patient != "Pt1") %>% 
+  tukey_hsd(aov(Frequency ~ Outcome, data = .))
+
+png("/Users/jadamik/Documents/Butterfield_Lab/JAFCM108/Figures_108/Frequencies_CD5neg_cDC2s.png", 
+    height=3, width=3, units="in", res=600)
+Average_Frequencies %>%   
+  filter(population == "CD5-cDC2s") %>% 
+  ggplot(aes(x = Outcome, y =  Frequency)) + 
+  geom_point(position=position_jitterdodge(jitter.width = 0),aes(fill= Response), shape=21,color="black", size = 2, alpha = 0.85) + 
+  geom_boxplot(aes(group=Outcome),size = 0.2, color= "black",alpha=0.2,outlier.colour = NA)+
+  scale_fill_manual(values=c("magenta","red","green","lightblue","blue","grey45"))+  
+  stat_pvalue_manual(CD5neg_cDC2s_stat,
+                     label = "p.adj",
+                     size=3,
+                     y.position = c(47,52,57), #step.increase = 0.1,
+                     tip.length = 0.0, vjust = 0.01)+
+  theme_classic()+ 
+  ylab("Frequency (CD5-cDC2s)")+
+  ylim(12.5,60)+
+  theme_indi
+dev.off()
+###
+# CD14+DC3s
+###
+CD14pos_DC3s_stat <- Average_Frequencies %>%   
+  filter(population == "CD14+DC3s") %>%
+  tukey_hsd(aov(Frequency ~ Outcome, data = .))
+
+png("/Users/jadamik/Documents/Butterfield_Lab/JAFCM108/Figures_108/Frequencies_CD14pos_DC3s.png", 
+    height=3, width=3, units="in", res=600)
+Average_Frequencies %>%   
+  filter(population == "CD14+DC3s") %>% 
+  ggplot(aes(x = Outcome, y =  Frequency)) + 
+  geom_point(position=position_jitterdodge(jitter.width = 0),aes(fill= Response), shape=21,color="black", size = 2, alpha = 0.85) + 
+  geom_boxplot(aes(group=Outcome),size = 0.2, color= "black",alpha=0.2,outlier.colour = NA)+
+  scale_fill_manual(values=c("magenta","red","green","lightblue","blue","grey45"))+  
+  stat_pvalue_manual(CD14pos_DC3s_stat,
+                     label = "p.adj",
+                     size=3,
+                     y.position = c(66,73,80), #step.increase = 0.1,
+                     tip.length = 0.0, vjust = 0.01)+
+  theme_classic()+ 
+  ylab("Frequency (CD14+DC3s)")+
+  ylim(15,84)+
+  theme_indi
+dev.off()
+###
+# CD14-DC3s
+###
+CD14neg_DC3s_stat <- Average_Frequencies %>%   
+  filter(population == "CD14-DC3s") %>%
+  tukey_hsd(aov(Frequency ~ Outcome, data = .))
+
+png("/Users/jadamik/Documents/Butterfield_Lab/JAFCM108/Figures_108/Frequencies_CD14neg_DC3s.png", 
+    height=3, width=3, units="in", res=600)
+Average_Frequencies %>%   
+  filter(population == "CD14-DC3s") %>% 
+  filter(Patient != "Pt2") %>% 
+  ggplot(aes(x = Outcome, y =  Frequency)) + 
+  geom_point(position=position_jitterdodge(jitter.width = 0),aes(fill= Response), shape=21,color="black", size = 2, alpha = 0.85) + #library(ggbeeswarm)
+  geom_boxplot(aes(group=Outcome),size = 0.2, color= "black",alpha=0.2,outlier.colour = NA)+
+  scale_fill_manual(values=c("magenta","red","green","lightblue","blue","grey45"))+  
+  stat_pvalue_manual(CD14neg_DC3s_stat,
+                     label = "p.adj",
+                     size=3,
+                     y.position = c(30,35,25), #step.increase = 0.1,
+                     tip.length = 0.0, vjust = 0.01)+
+  theme_classic()+ 
+  ylab("Frequency (CD14-cDC3s)")+
+  ylim(0,38)+
+  theme_indi
+dev.off()
+###
+#############################################
+```
+
+
+
+
+
+
+
+
+
+
+
+

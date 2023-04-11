@@ -1,0 +1,3145 @@
+---
+title: "R Notebook JACyTOF2 NEW"
+output: html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+This code is used for analysis of .fcs files from Cytek Aurora SCENITH analysis
+Directory is set to:
+LHB Github
+
+# load functions library
+```{r, echo=TRUE, include=FALSE}
+library(easypackages)
+packages(c("dplyr", "broom",  "ggrepel","flowCore", "pheatmap","xlsx",
+           "tidyverse", "patchwork", "broom", "effsize","fst","ggplot2","gdata","rstatix","limma",
+           "doBy","reshape2","devtools","scico","readr","magrittr","uwot","readxl","ggridges",
+           "ggbeeswarm","viridis","RColorBrewer", "lme4","ComplexHeatmap","gridBase","circlize","dendextend","heatmaply","ggpubr","corrr", "survminer", "survival", "rstatix"))
+library(limma)
+library(ggrepel)
+library(umap)
+library(gridBase)
+library(circlize)
+library("survival")
+library("survminer")
+
+make_tukey_test <- function (data,variable,grouping_variable){
+  data %>%
+    tukey_hsd(reformulate(grouping_variable, variable)) %>%
+    add_y_position()
+}
+```
+
+```{include=FALSE}
+# load functions library
+getwd()
+
+source("functions_library_clean.R")
+
+# to avoid conflicts
+filter <- dplyr::filter
+summarize <-  dplyr::summarize
+
+# set some directories
+fcs_path <- "../JAFCM111_SCENITH_mDC - Gated Populations/"
+fcs_files <- list.files(path = fcs_path, pattern = "*.fcs", full.names = FALSE)
+
+###########################################################
+
+# read in the metadata
+md_path <-  "../Metadata/09-021_SCENITH_Sample_Info.csv"
+
+read_csv(md_path) %>%
+  mutate_all(list(~factor(.))) ->
+  md
+md
+md %<>% mutate(Inhibitor = case_when(
+   grepl("CTRL", sample_id) ~ "CTRL",
+   grepl("2DG", sample_id) ~ "2DG",
+   grepl("O_", sample_id) ~ "O",
+   grepl("Z_", sample_id) ~ "Z",
+   grepl("E_", sample_id) ~ "E",
+   grepl("T_", sample_id) ~ "T",
+))
+md %>% filter(is.na(Inhibitor))
+md
+
+md %<>% dplyr::mutate_if(is.factor, as.character) %>% mutate(Patient_Info = case_when(
+  grepl("HD [0-2]", sample_id) ~ paste(str_extract(sample_id, "HD [0-2]")),
+  
+  grepl("^HD3", sample_id) ~ str_extract(sample_id, "HD3"),
+  grepl("^Pt_._", sample_id) ~ str_extract(sample_id, "^Pt_."),
+  grepl("^Pt_.._", sample_id) ~ str_extract(sample_id, "^Pt_..")))
+
+
+# change HD 1 and HD 2 - to eliminate spaces
+for (i in 1:nrow(md)) {
+  if(grepl("HD 1", md$Patient_Info[i]) == TRUE) {
+    md$Patient_Info[i] = "HD1" } 
+  else if(grepl("HD 2", md$Patient_Info[i]) == TRUE) {
+    md$Patient_Info[i] = "HD2" } 
+      else { md$Patient_Info[i]
+      }
+}
+
+########### ########### ########### ########### ###########
+
+fcs_files %in% md$filename
+
+md %>% filter(grepl(pattern = "Pt_12", sample_id))
+md %>% filter(is.na(Inhibitor))
+
+###########
+# to read in individual files to be sure that the directories are set up well
+# fs <- read.flowSet(path = fcs_path, pattern = ".fcs", transformation = F, truncate_max_range = F)
+# fs
+
+# attributes(fs)
+# # to look at the expression matrix
+# files <- as.data.frame(fsApply(fs, class)) %>% rownames_to_column(var = "file")
+# fsApply(fs, frames)
+# files
+# fs[[class]]
+# 
+# phenoData(fs)
+# 
+# panel <- as.data.frame(pData(parameters(fs[[1]])))
+# 
+# pData(parameters(fs[[class]]))
+# write_csv(files, "files.csv")
+# 
+# panel_fcs <- pData(parameters(fs[[1]]))
+# head(panel_fcs)
+# 
+###########
+# # Replace problematic characters 
+# panel_fcs$desc <- gsub("-", "_", panel_fcs$desc)
+# To check files
+list.files(path = fcs_path, pattern = "*.fcs", full.names = F)
+
+panel_path <- "../Metadata/09-021_mDC_SCENITH_panel.xlsx"
+
+# read in panel
+read_excel(panel_path, sheet = 1) %>%
+  dplyr::mutate_if(is.character, as.factor) ->
+  panel
+colnames(panel)
+panel
+
+
+# look at the levels in Panel_Summary
+#unique(panel$Group) %>%  as.data.frame()
+
+# use forcats to collapse marker groups 
+# Panel_ADDon <- panel %>% 
+#   mutate(Category = fct_collapse(Group,
+#                                  Immune = c("DC"),
+#                                  Metabolic = c("AA","ETC_TCA","FAO","GLYC","MITO","SIGNAL","HEME","PPP", "ROS"),
+#                                  DNARNAPROT = c("DNA_RNA_PROT")
+#                                  )) 
+
+```
+
+```{include=FALSE}
+# read in gates and apply to files
+data_all <- read.fstodf(path_fcs = fcs_path, desc = md)
+data_all <- data_all[,colnames(data_all) != "empty"]
+data_all <- as_tibble(data_all)
+data_all <- data_all %>% select(-matches("^NA."),-LIVE)
+All.channels <- colnames(data_all %>% select_if(is.numeric))
+dput(as.character(All.channels))
+# To visualize the histogram for particular marker
+ggplot(data_all, aes(x = log(HLA.DR)))+ geom_histogram(bins = 1000)
+```
+
+# Channel Sub-setting and Normalization
+```{include=FALSE}
+#############################################################################################################
+
+Subset_Aurora <- data_all # to save original table if needed
+
+LOG_Aurora <- Subset_Aurora
+
+LOG_Aurora[,All.channels][LOG_Aurora[,All.channels] < 0] <- 0.001 # all values 0 or less get converted to 0.001
+
+LOG_Aurora[,All.channels] <- log(LOG_Aurora[,All.channels]/100) # log transform and divide by 100
+
+LOG_Aurora[,All.channels][LOG_Aurora[,All.channels] <= 0.001] <- NA # all values 0 or less get converted to NA
+
+# Visual Marker expression distribution Inspection
+
+LOG_Aurora %<>% filter(!grepl("Unstained", filename, fixed = TRUE)) 
+#unique(LOG_Aurora$sample_id)
+
+# Normalize using library(heatmaply) package
+#LOG_Aurora[,All.channels] <- normalize(LOG_Aurora[,All.channels]) 
+###################################
+```
+
+```{include=FALSE}
+ggplot(LOG_Aurora  %>% group_by(filename) %>% sample_n(size = 10000, replace = T, set.seed(1234)), aes(x = Puromycin))+ 
+  geom_histogram(bins = 1000)
+#LOG_Aurora %>% group_by(filename) %>% tally() %>% arrange(n)
+```
+
+```{include=FALSE}
+# library(janitor)  # we can use janitor package to check out duplicated rows in column
+# Data_Puro %>% filter(Inhibitor == "CTRL") %>% get_dupes(Patient_Pop)  #
+# # another way to check it is using: duplicated(Data_Puro$Patient_Pop)
+```
+
+# Mean/Median Expression Tables
+Metabolic Calculations based on all cell counts collected
+```{include=FALSE}
+# glimpse(LOG_Aurora)
+# 
+# LOG_JAFCM111_mean <- LOG_Aurora %>%
+#   group_by(Patient_Info, Inhibitor ,filename,sample_id) %>% 
+#   dplyr::summarise(across(where(is.numeric), ~ mean(.x, na.rm = TRUE))) %>% 
+#   ungroup()
+
+#LOG_JAFCM111_mean %>% write_csv("LOG_JAFCM111_mean.csv")
+
+# LOG_JAFCM111_median <- LOG_Aurora %>%
+#   group_by(Patient_Info, Inhibitor ,filename,sample_id) %>% 
+#   dplyr::summarise(across(where(is.numeric), ~ median(.x, na.rm = TRUE))) %>% 
+#   ungroup()
+
+#LOG_JAFCM111_median %>% write_csv("LOG_JAFCM111_median.csv")
+```
+
+# ------------------
+#1. Load Expression and Clinical Data
+```{r}
+LOG_JAFCM111_mdian <- read_csv("./09-021_SCENITH_mDC/LOG_JAFCM111_median.csv")
+
+read_csv("./Metadata/09_021_Clinl_Final.Table_06122022.csv") %>% 
+  dplyr::mutate_if(is.character, as.factor) ->
+  ClinicalPhenoData
+
+glimpse(ClinicalPhenoData)
+
+dim(ClinicalPhenoData)
+glimpse(ClinicalPhenoData)
+
+ClinicalPhenoData$Sequence_Number <- as.character(ClinicalPhenoData$Sequence_Number)
+
+grepl("^[0-9]",Clin_Data_Sub$Sequence_Number) 
+
+Clin_Data_Sub <- ClinicalPhenoData %>% mutate(Patient_Info = case_when(
+  grepl('^[0-9]',ClinicalPhenoData$Sequence_Number) ~ paste0("Pt_", ClinicalPhenoData$Sequence_Number)))
+
+read_csv("./Metadata/Clinical_DF_modified_correct_111821.csv")  %>% 
+  dplyr::mutate_if(is.character, as.factor) ->
+  T_cell_Resp
+
+
+glimpse(T_cell_Resp)
+T_cell_Resp %>%  filter(Time_Point == "d89") %>% pull(CD4.iDC_COMBO)
+T_cell_Resp <- T_cell_Resp %>% filter(Metabolic_Sample == "CTRL") %>%  filter(Time_Point == "d89") %>% 
+  mutate(Sequence_Number = recode(Sequence_Number, "HD1.1" = "HD1")) %>% 
+  filter(Sequence_Number != "HD1.2") %>% droplevels() %>% select(-Time_Point,-Metabolic_Sample)
+
+T_cell_Resp %<>%  mutate(Sequence_Number = as.character(Sequence_Number)) %>% 
+  mutate(Patient_Info = case_when(
+  grepl('^[0-9]',T_cell_Resp$Sequence_Number) ~ paste0("Pt_", T_cell_Resp$Sequence_Number),
+  grepl("HD",T_cell_Resp$Sequence_Number) ~ paste0("", T_cell_Resp$Sequence_Number))) %>%  arrange(Patient_Info)
+
+```
+
+#2. Metabolic Calculations 
+```{r}
+# LOG_JAFCM111_mdian %>% ggplot(aes(x = sample_id, y = Puromycin))+ 
+#   geom_col(aes(fill = Inhibitor))
+  
+Data_Puro_mean <- LOG_JAFCM111_mdian %>% select(filename,sample_id,Patient_Info,Inhibitor,Puromycin)
+
+Data_Puro_spread <- Data_Puro_mean %>% select(sample_id:Puromycin) %>%   # we psread individual treatments into separate columns
+  spread(key=Inhibitor, value=Puromycin, fill = NA, convert = FALSE)
+
+Data_Puro_spread
+
+For_Metab_Calculation <- Data_Puro_spread %>%
+  group_by(Patient_Info) %>%
+  dplyr::summarise(across(where(is.numeric), ~ max(.x, na.rm = TRUE))) %>% 
+  ungroup() %>% 
+  select(Patient_Info, CTRL,`2DG`,O, Z, E, `T`)
+
+Data_Puro_Calc <- For_Metab_Calculation %>% 
+  mutate(Glucose_Dep = (CTRL-`2DG`)/(CTRL-Z)*100) %>% 
+  mutate(Mito_Dep = (CTRL-O)/(CTRL-Z)*100) %>% 
+  mutate(Glyco_Cap = 100-Mito_Dep) %>% 
+  mutate(FAAO = 100-Glucose_Dep) %>% 
+  mutate(FAO_Dep = (CTRL-E)/(CTRL-Z)*100) %>% 
+  mutate(Glnlysis_Dep = (CTRL-`T`)/(CTRL-Z)*100)
+
+Data_Puro_Calc <- Data_Puro_Calc %>% 
+  mutate(FAO_Dep = FAO_Dep+10) %>% 
+  mutate(Glnlysis_Dep = Glnlysis_Dep+10)
+
+################################
+# Join LCInical table with median values
+Data_Puro_Calc_Clin <- left_join(Data_Puro_Calc,Clin_Data_Sub, by = "Patient_Info")  
+Data_Puro_Calc_Clin
+
+replace_factor_na <- function(x){
+  x <- as.character(x)
+  x <- if_else(is.na(x), "HD", x)
+  x <- as.factor(x)
+}
+Data_Puro_Calc_Clin %<>%
+  mutate(Outcome = replace_factor_na(Outcome),
+         Outcome.1 = replace_factor_na(Outcome.1),
+         Response = replace_factor_na(Response))  %>%  arrange(Patient_Info)
+
+glimpse(Data_Puro_Calc)
+```
+
+# Protein Synthesis adjusted values
+```{include=FALSE}
+glimpse(Data_Puro_Calc_Clin)
+Data_Puro_Calc_Clin %<>% mutate(
+  TLN_Glucose_Dep = Glucose_Dep*(CTRL-Z),
+  TLN_Mito_Dep = Mito_Dep*(CTRL-Z),
+  TLN_Glycol_Cap = Glyco_Cap*(CTRL-Z),
+  TLN_FAAO = FAAO*(CTRL-Z),
+  TLN_FAO_Dep = FAO_Dep*(CTRL-Z),
+  TLN_Glutaminolysis_Dep = Glnlysis_Dep*(CTRL-Z))
+```
+
+#3. Clinical T cell response JOINING
+```{r}
+Data_Puro_Calc_Clin$Patient_Info %in% T_cell_Resp$Patient_Info
+
+setdiff(colnames(T_cell_Resp),colnames(Data_Puro_Calc_Clin))
+Puro_CLinical <- Data_Puro_Calc_Clin %>% left_join(T_cell_Resp %>%  select(Patient_Info,Bulk_Response_Per_Patient:Vaccine_Response,Prev.Therapy:CD8_CD4_COMBO), by = "Patient_Info")  
+glimpse(Puro_CLinical)
+
+Puro_CLinical %<>% rename("Glucose Dependence" = "Glucose_Dep",
+                         "Mitochondrial Dependence" = "Mito_Dep",
+                         "Glycolytic Capacity" = "Glyco_Cap",
+                         "FAO Dependence" = "FAO_Dep",
+                         "Glutaminolysis Dependence" = "Glnlysis_Dep")
+
+Data_Puro_Calc_Clin_Tidy <- Puro_CLinical %>%  gather(Metabolism, Value, `Glucose Dependence`:`Glutaminolysis Dependence`) 
+Data_Puro_Calc_Clin_Tidy$Metabolism <- factor(Data_Puro_Calc_Clin_Tidy$Metabolism, 
+                                              levels=c("Glucose Dependence","Mitochondrial Dependence","Glycolytic Capacity","FAAO",
+                                              "FAO Dependence","Glutaminolysis Dependence"))
+```
+
+#4. Set levels Metabolism
+```{r}
+Data_Puro_Calc_Clin_Tidy$Response <- factor(Data_Puro_Calc_Clin_Tidy$Response, levels=c("HD","PR","SD","NED1","NED2","PD"))
+Data_Puro_Calc_Clin_Tidy$Outcome <- factor(Data_Puro_Calc_Clin_Tidy$Outcome, levels=c("HD","Good","Bad"))
+Data_Puro_Calc_Clin_Tidy$Outcome.1 <- factor(Data_Puro_Calc_Clin_Tidy$Outcome.1, levels=c("HD","Good","Stable","Bad"))
+Data_Puro_Calc_Clin_Tidy$CD8_Resp_Per_Patient <- factor(Data_Puro_Calc_Clin_Tidy$CD8_Resp_Per_Patient, levels=c("No","Yes"))
+Data_Puro_Calc_Clin_Tidy$CD4_Resp_Per_Patient <- factor(Data_Puro_Calc_Clin_Tidy$CD4_Resp_Per_Patient, levels=c("No","Yes"))
+Data_Puro_Calc_Clin_Tidy$CD8.CD4_Resp_Per_Patient <- factor(Data_Puro_Calc_Clin_Tidy$CD8.CD4_Resp_Per_Patient, levels=c("No","Yes", "NA"))
+```
+
+# Set Colors
+```{r}
+cols.Response = c("magenta","red","green","lightblue","blue","grey45")
+cols.Response.assign <- setNames(cols.Response, levels(Data_Puro_Calc_Clin_Tidy$Response))
+
+cols.Outcome = c("magenta","red","grey45")
+cols.Outcome.assign <- setNames(cols.Outcome, levels(Data_Puro_Calc_Clin_Tidy$Outcome))
+
+cols.Outcome.1 = c("magenta","red","green","grey45")
+cols.Outcome.1.assign <- setNames(cols.Outcome.1, levels(Data_Puro_Calc_Clin_Tidy$Outcome.1))
+
+cols.T_cell = c("grey45","tomato", "black")
+cols.T_cell.assign <- setNames(cols.T_cell, levels(Data_Puro_Calc_Clin_Tidy$CD8.CD4_Resp_Per_Patient))
+cols.T_cell.assign
+```
+
+# jitter_1
+```{r}
+jitter_0 <- position_jitter(width = 0.25, height = 0)
+jitter_1 <- position_jitter(width = 0.1, height = 0)
+```
+
+# for T-test calculations
+```{r}
+Test_AA <- Data_Puro_Calc_Clin_Tidy %>% filter(Response != "HD") %>% 
+   group_by(Metabolism)  %>% 
+  t_test(Value ~ Outcome) %>%  add_y_position()
+```
+
+# ----------------------------
+# Metabolic Plots based on Outcome
+```{r}
+Theme_1 <-  theme(
+  legend.position = "right", aspect.ratio = 1.25/1,
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  strip.text = element_text(size = 8.75, face ="bold"),              # to label add individual box
+  strip.background =element_blank(), 
+  panel.border = element_rect(colour = "black", fill=NA, size=0.5),
+  # to color individual box
+  axis.text.x = element_text(face="plain", color="black",size=10),
+  # to label x-axis tics/number labels
+  axis.text.y = element_text(face="plain", color="black",size=10),  # to label y-axis tics/number labels
+  axis.title.x= element_blank(),                                    # to label/remove x-axis labels
+  axis.title.y= element_text(face="plain", color="black",size=10),    # to label/remove y-axis labels
+  axis.ticks = element_line(colour = "black", size = 1))
+```
+
+# BOX 1 Outcome (Figure 3A) 
+```{r}
+# test if data is normally distributed
+Test_A <- Data_Puro_Calc_Clin_Tidy %>% filter(Patient_Info != "Pt_28") %>% 
+    group_by(Outcome, Metabolism)  %>% 
+    do(tidy(shapiro.test(.$Value))) %>% 
+    ungroup() %>% 
+    select(-method)
+Test_A
+Test_A %<>% mutate(Normality = case_when(
+    p.value > 0.05 ~ "Normal",
+  p.value < 0.05 ~ "Not.Normal"
+))
+Test_A # These are normally distributed data 
+
+###  Comparison between outcome groups using t-test
+t_test.A <- Data_Puro_Calc_Clin_Tidy %>% filter(Response != "HD") %>%
+  group_by(Metabolism) %>%  
+  t_test(Value ~ Outcome) %>% add_y_position()
+# BOX Plot
+png("../Figures_09021_SC_mDC/BOX/BOX_Goob_Bad_SCENITH_Param_stats_scales.png",
+    height=4.5, width=8.5, units="in", res=600)
+Data_Puro_Calc_Clin_Tidy %>%  filter(Response != "HD") %>% filter(Patient_Info != "Pt_28") %>% 
+  ggplot(aes(x = Outcome, y = Value)) +
+        geom_boxplot(outlier.colour = NA, col = "grey50", alpha = 0.7) +
+
+  geom_jitter(position = jitter_0, shape=21,color="black",size = 2, alpha = 0.5,    aes(color=Response,fill=Response))+
+  #geom_vline(xintercept = c(2.5),col="black", lwd = 0.5, linetype="dashed", alpha=1)+
+  scale_color_manual(values = c(cols.Response.assign))+
+  scale_fill_manual(values = c(cols.Response.assign))+
+  stat_pvalue_manual(t_test.A,  label = "p", tip.length = 0,
+                     vjust = 0.01,
+                     size=3,
+                     hide.ns = FALSE) +
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.15)))+
+  theme_bw() +
+  facet_wrap(~Metabolism, scales = "free", nrow = 1,
+             labeller = label_wrap_gen(width = 5, multi_line = TRUE)) + Theme_1
+dev.off()
+
+
+png("../Figures_09021_SC_mDC/BOX/BOX_Goob_Bad_SCENITH_Param_stats_scales.png",
+    height=4.5, width=8.5, units="in", res=600)
+
+library(purrr)
+library(Rmisc)
+Data_Puro_Calc_Clin_Tidy$Metabolism
+Mtab.tgc <- summarySE(Data_Puro_Calc_Clin_Tidy %>% filter(Value > 0 & Value < 125), measurevar="Value", groupvars=c("Metabolism"))
+stat.test <- Data_Puro_Calc_Clin_Tidy %>% filter(Value > 0 & Value < 125) %>% 
+  t_test(Value ~  Metabolism, ref.group = "Mitochondrial Dependence") %>% add_y_position()
+
+Data_Puro_Calc_Clin_Tidy$Metabolism <- factor(Data_Puro_Calc_Clin_Tidy$Metabolism, levels=c("Mitochondrial Dependence","Glucose Dependence","Glycolytic Capacity","FAAO",
+                                                  "FAO Dependence","Glutaminolysis Dependence"))
+# BAR PLOT
+png("./Figures_09021_SC_mDC/BOX/BAR+Plot_Metabolism_stats.png", height=6, width=6, units="in", res=600)
+
+Data_Puro_Calc_Clin_Tidy %>%  filter(Value > 0 & Value < 125) %>% 
+  ggplot(aes(x = Metabolism, y = Value)) +
+  geom_jitter(aes(color = Metabolism),position = jitter_0, size = 3, alpha = 0.65) +
+  #geom_vline(xintercept = c(2.5),col="black", lwd = 0.5, linetype="dashed", alpha=1)+
+    scale_color_manual(values = c("blue","black","red","purple","dodgerblue","magenta"))+
+  
+  geom_bar(Mtab.tgc,
+           mapping = aes(x = Metabolism, y = Value, fill=Metabolism), position=position_dodge(), stat="identity", alpha = 0.5) +
+    geom_errorbar(Mtab.tgc,
+                  mapping = aes(ymin=Value-se, ymax=Value+se),
+                  width=.2,                    # Width of the error bars
+                  position=position_dodge(.9)) + theme_bw() + 
+    scale_fill_manual(values = c("blue","black","red","purple","dodgerblue","magenta"))+
+  
+  stat_pvalue_manual(stat.test  ,  label = "p.adj", tip.length = 0,
+                     vjust = 0.01,
+                     size=5,
+                     hide.ns = FALSE)+
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.15)))+
+  theme_classic() + 
+  theme(
+  legend.position = "right", aspect.ratio = 1/0.6,
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  strip.text = element_text(size = 8.75, face ="bold"),              # to label add individual box
+  strip.background =element_blank(), 
+  panel.border = element_rect(colour = "NA", fill=NA, size=0.5),
+  # to color individual box
+  axis.text.x = element_text(face="plain", color="black",size=10),
+  # to label x-axis tics/number labels
+  axis.text.y = element_text(face="plain", color="black",size=16),  # to label y-axis tics/number labels
+  axis.title.x= element_blank(),                                    # to label/remove x-axis labels
+  axis.title.y= element_blank(),   # to label/remove y-axis labels
+  axis.ticks = element_line(colour = "black", size = 1))
+dev.off()
+# Error bars represent standard error of the mean
+Mtab.tgc$Metabolism <- factor(Mtab.tgc$Metabolism, levels=c("Mitochondrial Dependence","Glucose Dependence","Glycolytic Capacity","FAAO",
+                                                  "FAO Dependence","Glutaminolysis Dependence"))
+```
+
+# BOX 2 T cell Response
+```{r}
+# Set theme 
+Theme_B <-  theme(
+  legend.position = "right", aspect.ratio = 1.25/1,
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  strip.text = element_text(size = 8.75, face ="bold"),              # to label add individual box
+  strip.background =element_blank(), 
+  panel.border = element_rect(colour = "black", fill=NA, size=0.5),
+  # to color individual box
+  axis.text.x = element_text(face="plain", color="black",size=10),
+  # to label x-axis tics/number labels
+  axis.text.y = element_text(face="plain", color="black",size=10),  # to label y-axis tics/number labels
+  axis.title.x= element_blank(),                                    # to label/remove x-axis labels
+  axis.title.y= element_text(face="plain", color="black",size=10),    # to label/remove y-axis labels
+  axis.ticks = element_line(colour = "black", size = 1))
+# test if data is normally distributed
+Test_B <- Data_Puro_Calc_Clin_Tidy %>% filter(!is.na(CD4_Resp_Per_Patient)) %>% 
+    group_by(CD4_Resp_Per_Patient, Metabolism)  %>% 
+    do(tidy(shapiro.test(.$Value))) %>% 
+    ungroup() %>% 
+    select(-method)
+Test_B
+Test_B %<>% mutate(Normality = case_when(
+    p.value > 0.05 ~ "Normal",
+  p.value < 0.05 ~ "Not.Normal"
+))
+Test_B # These are normally distributed data 
+
+CD4.Res.t_test.A <- Data_Puro_Calc_Clin_Tidy %>% filter(!is.na(CD4_Resp_Per_Patient)) %>% 
+  group_by(Metabolism) %>%   filter(Metabolism != "FAO Dependence") %>% 
+  t_test(Value ~ CD4_Resp_Per_Patient) %>% add_y_position()
+
+# Since FAO Dependence is not normally distributed I used wilcox_test for the analysis
+CD4.Res.t_test.B <- Data_Puro_Calc_Clin_Tidy %>% filter(!is.na(CD4_Resp_Per_Patient)) %>% 
+  filter(Metabolism == "FAO Dependence") %>% 
+  group_by(Metabolism) %>% 
+  wilcox_test(Value ~ CD4_Resp_Per_Patient) %>% add_y_position()
+
+png("./Figures_09021_SC_mDC/BOX//BOX_CD4_SCENITH_Param_stats.png",
+    height=4.5, width=8.5, units="in", res=600)
+Data_Puro_Calc_Clin_Tidy %>%  filter(!is.na(CD4_Resp_Per_Patient)) %>% 
+  ggplot(aes(x = CD4_Resp_Per_Patient, y = Value)) +
+        geom_boxplot(outlier.colour = NA, col = "grey50", alpha = 0.7) +
+
+  geom_jitter(position = jitter_0, shape=21,color="black",size = 2, alpha = 0.5,    aes(color=Response,fill=Response))+
+  #geom_vline(xintercept = c(2.5),col="black", lwd = 0.5, linetype="dashed", alpha=1)+
+  scale_color_manual(values = c(cols.Response.assign))+
+  scale_fill_manual(values = c(cols.Response.assign))+
+  stat_pvalue_manual(CD4.Res.t_test.A,  label = "p", tip.length = 0,
+                     vjust = 0.01,
+                     size=3,
+                     hide.ns = FALSE)+
+    stat_pvalue_manual(CD4.Res.t_test.B,  label = "p", tip.length = 0,
+                     vjust = 0.01,
+                     size=3,
+                     hide.ns = FALSE)+
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.15)))+
+  theme_bw() +
+  facet_wrap(~Metabolism, scales = "free_y", nrow = 1,
+             labeller = label_wrap_gen(width = 5, multi_line = TRUE)) +
+  ggtitle("CD4 Responses")+Theme_B
+
+dev.off()
+
+# test if data is normally distributed
+Test_C <- Data_Puro_Calc_Clin_Tidy %>% filter(!is.na(CD8_Resp_Per_Patient)) %>% 
+    group_by(CD8_Resp_Per_Patient, Metabolism)  %>% 
+    do(tidy(shapiro.test(.$Value))) %>% 
+    ungroup() %>% 
+    select(-method)
+Test_C
+Test_C %<>% mutate(Normality = case_when(
+    p.value > 0.05 ~ "Normal",
+  p.value < 0.05 ~ "Not.Normal"
+))
+Test_C # These are normally distributed data 
+
+
+CD8.Res.t_test.A <- Data_Puro_Calc_Clin_Tidy %>% filter(!is.na(CD8_Resp_Per_Patient)) %>% 
+  group_by(Metabolism) %>%   filter(!Metabolism %in% c("FAO Dependence","Glutaminolysis Dependence")) %>% 
+   t_test(Value ~ CD8_Resp_Per_Patient) %>% add_y_position()
+# Since FAO Dependence is not normally distributed I used wilcox_test for the analysis
+CD8.Res.t_test.B <- Data_Puro_Calc_Clin_Tidy %>% filter(!is.na(CD8_Resp_Per_Patient)) %>% 
+  filter(Metabolism %in% c("FAO Dependence","Glutaminolysis Dependence")) %>% 
+  group_by(Metabolism) %>% 
+  wilcox_test(Value ~ CD8_Resp_Per_Patient) %>% add_y_position()
+
+png("./Figures_09021_SC_mDC/BOX/BOX_CD8_SCENITH_Param_stats.png",
+    height=4.5, width=8.5, units="in", res=600)
+Data_Puro_Calc_Clin_Tidy %>%  filter(!is.na(CD8_Resp_Per_Patient)) %>% 
+  ggplot(aes(x = CD8_Resp_Per_Patient, y = Value)) +
+        geom_boxplot(outlier.colour = NA, col = "grey50", alpha = 0.7) +
+
+  geom_jitter(position = jitter_0, shape=21,color="black",size = 2, alpha = 0.5,    aes(color=Response,fill=Response))+
+  #geom_vline(xintercept = c(2.5),col="black", lwd = 0.5, linetype="dashed", alpha=1)+
+  scale_color_manual(values = c(cols.Response.assign))+
+  scale_fill_manual(values = c(cols.Response.assign))+
+  stat_pvalue_manual(CD8.Res.t_test.A, label = "p", tip.length = 0,
+                     vjust = 0.01,
+                     size=3,
+                     hide.ns = FALSE)+
+    stat_pvalue_manual(CD8.Res.t_test.B, label = "p", tip.length = 0,
+                     vjust = 0.01,
+                     size=3,
+                     hide.ns = FALSE)+
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.15)))+
+  theme_bw() +
+  facet_wrap(~Metabolism, scales = "free_y", nrow = 1,
+             labeller = label_wrap_gen(width = 5, multi_line = TRUE)) +
+   ggtitle("CD8 Responses")+ Theme_B
+dev.off()
+
+
+
+# test if data is normally distributed
+Test_D <- Data_Puro_Calc_Clin_Tidy %>% filter(!is.na(CD8.CD4_Resp_Per_Patient)) %>% 
+    group_by(CD8.CD4_Resp_Per_Patient, Metabolism)  %>% 
+    do(tidy(shapiro.test(.$Value))) %>% 
+    ungroup() %>% 
+    select(-method)
+Test_D
+Test_D %<>% mutate(Normality = case_when(
+    p.value > 0.05 ~ "Normal",
+  p.value < 0.05 ~ "Not.Normal"
+))
+Test_D # These are normally distributed data 
+
+
+CD8.CD4_Resp_Per_Patient.A <- Data_Puro_Calc_Clin_Tidy %>% filter(!is.na(CD8.CD4_Resp_Per_Patient)) %>% 
+  group_by(Metabolism) %>%   filter(!Metabolism %in% c("FAO Dependence","Glutaminolysis Dependence")) %>% 
+   t_test(Value ~ CD8.CD4_Resp_Per_Patient) %>% add_y_position()
+# Since FAO Dependence is not normally distributed I used wilcox_test for the analysis
+CD8.CD4_Resp_Per_Patient.B <- Data_Puro_Calc_Clin_Tidy %>% filter(!is.na(CD8.CD4_Resp_Per_Patient)) %>% 
+  filter(Metabolism %in% c("FAO Dependence","Glutaminolysis Dependence")) %>% 
+  group_by(Metabolism) %>% 
+  wilcox_test(Value ~ CD8.CD4_Resp_Per_Patient) %>% add_y_position()
+
+png("./Figures_09021_SC_mDC/BOX/BOX_CD8.CD4_SCENITH_Param_stats.png",
+    height=4.5, width=8.5, units="in", res=600)
+Data_Puro_Calc_Clin_Tidy %>%  filter(!is.na(CD8.CD4_Resp_Per_Patient)) %>% 
+  ggplot(aes(x = CD8.CD4_Resp_Per_Patient, y = Value)) +
+        geom_boxplot(outlier.colour = NA, col = "grey50", alpha = 0.7) +
+
+  geom_jitter(position = jitter_0, shape=21,color="black",size = 2, alpha = 0.5,    aes(color=Response,fill=Response))+
+  #geom_vline(xintercept = c(2.5),col="black", lwd = 0.5, linetype="dashed", alpha=1)+
+  scale_color_manual(values = c(cols.Response.assign))+
+  scale_fill_manual(values = c(cols.Response.assign))+
+  stat_pvalue_manual(CD8.CD4_Resp_Per_Patient.A,  label = "p", tip.length = 0,
+                     vjust = 0.01,
+                     size=3,
+                     hide.ns = FALSE)+
+    stat_pvalue_manual(CD8.CD4_Resp_Per_Patient.B,  label = "p", tip.length = 0,
+                     vjust = 0.01,
+                     size=3,
+                     hide.ns = FALSE)+
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.15)))+
+  theme_bw() +
+  facet_wrap(~Metabolism, scales = "free_y", nrow = 1,
+             labeller = label_wrap_gen(width = 5, multi_line = TRUE)) +
+   ggtitle("CD8+CD4 Responses")+ Theme_B
+dev.off()
+```
+
+# ----------------------------
+### 1.Linear Regression SCENITH
+3 outcome groups (HD, Good, Bad)
+```{r}
+normalize <- heatmaply::normalize
+Data_Puro_Calc_Clin_Tidy.model <- Data_Puro_Calc_Clin_Tidy %>%  mutate(Value = normalize(Value)+0.01 %>% log10()) %>%
+  mutate(Outcome.1_Rank = case_when(
+  Outcome %in% c("HD") ~ 3,
+  Outcome %in% c("Good") ~ 2,
+  Outcome %in% c("Bad") ~ 1
+))
+Data_Puro_Calc_Clin_Tidy$Value
+
+Pre.lm_full <- Data_Puro_Calc_Clin_Tidy.model %>% nest(data=-Metabolism) %>%  
+  #filter(Cell.Type != "CD8:Treg Ratio") %>% 
+	mutate(
+		lm_out_full = map(data, ~lm(Outcome.1_Rank ~ Value, data=.x %>% filter(!is.na(Outcome.1_Rank)) %>% mutate(Outcome.1_Rank=as.numeric(Outcome.1_Rank)))),
+		pval_full = map_dbl(lm_out_full, ~.x %>% broom::tidy() %>% filter(term=="Value") %>% pull(p.value)),
+	)
+
+Pre.lm_full %>% select(-data, -lm_out_full) %>% arrange(pval_full)
+
+Plot_Outcome.1 <- Pre.lm_full %>% mutate(tidied = map(lm_out_full,conf.int = TRUE, tidy)) %>% 
+  unnest(tidied) %>% select(-data, -lm_out_full) %>% filter(term == "Value") %>%  mutate_if(is.character,as.factor) %>% arrange(pval_full) 
+
+Plot_Outcome.1 %<>% mutate(sig_value=round(p.value,3))
+
+png("../Figures_09021_SC_mDC/Linear_Regressions/Forest_Lregression_Outcome(3categ).png",
+     height=2.7, width=8, units="in", res=600)
+
+Plot_Outcome.1  %>% filter(!Metabolism %in% c("Glyco_Cap", "FAAO")) %>% 
+  ggplot(aes(x= estimate , y= fct_reorder(Metabolism,-sig_value), xmin=conf.low, xmax=conf.high, label = sig_value)) +
+  geom_text(nudge_x = 0.0, nudge_y = 0.4, size=5,color = "black") +
+  geom_pointrange()+ # Makes range for ggplot values based on the data and AES specified in first line
+  geom_errorbar(aes(xmin=conf.low, xmax=conf.high), width=0, cex=0.7)+ # Makes whiskers on the range (more aesthetically pleasing)
+  #coord_flip() + # flip coordinates (puts labels on y axis)
+  geom_point(shape = 10, size = 2.5) + # specifies the size and shape of the geompoint
+  geom_vline(xintercept = 0, color = "red", linetype = "dashed", cex = 1, alpha = 0.5) +
+  ggtitle("SCENITH (3 binary) Outcome Linear Regression")+ # Blank Title for the Graph
+  xlab(" (95% CI)") + 
+  ylab("SCENITH Parameter") +
+   theme(aspect.ratio = 1/2,
+        plot.title = element_text(size = 14, face = "bold"),
+        line = element_line(colour = "black", size = 2), # My personal theme for GGplots
+        strip.background = element_rect(fill=NA), 
+        legend.position ="none", 
+        axis.line.x = element_line(colour = "black"), 
+        axis.line.y = element_blank(), 
+        panel.border= element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        panel.background = element_blank(),
+        axis.text.y = element_text(face="plain", color="black",size=14),  # to label y-axis tics/number labels
+        axis.text.x = element_text(face="plain", color="black",size=14),  # to label y-axis tics/number labels
+        axis.title.x = element_text(face="plain", color="black",size=12, angle = 0,vjust = 0),
+        axis.title.y = element_text(face="plain", color="black",size=14,vjust = 0),                                    
+        axis.ticks = element_blank())
+dev.off() 
+```
+
+### 2.Linear Regression SCENITH
+2 outcome groups (Good, Bad) # basically a t-test
+```{r}
+Data_Puro_Calc_Clin_Tidy.model1 <- Data_Puro_Calc_Clin_Tidy %>%  filter(Response != "HD") %>% 
+  mutate(Value = normalize(Value)+0.01 %>% log10()) %>%
+  mutate(Outcome.1_Rank = case_when(
+  Outcome %in% c("Good") ~ 2,
+  Outcome %in% c("Bad") ~ 1
+))
+Data_Puro_Calc_Clin_Tidy$Value
+
+Pre.lm_full <- Data_Puro_Calc_Clin_Tidy.model1 %>% nest(data=-Metabolism) %>%  
+  #filter(Cell.Type != "CD8:Treg Ratio") %>% 
+	mutate(
+		lm_out_full = map(data, ~lm(Outcome.1_Rank ~ Value, data=.x %>% filter(!is.na(Outcome.1_Rank)) %>% mutate(Outcome.1_Rank=as.numeric(Outcome.1_Rank)))),
+		pval_full = map_dbl(lm_out_full, ~.x %>% broom::tidy() %>% filter(term=="Value") %>% pull(p.value)),
+	)
+
+Pre.lm_full %>% select(-data, -lm_out_full) %>% arrange(pval_full)
+
+Plot_Outcome.1 <- Pre.lm_full %>% mutate(tidied = map(lm_out_full,conf.int = TRUE, tidy)) %>% 
+  unnest(tidied) %>% select(-data, -lm_out_full) %>% filter(term == "Value") %>%  mutate_if(is.character,as.factor) %>% arrange(pval_full) 
+
+Plot_Outcome.1 %<>% mutate(sig_value=round(p.value,3))
+
+png("../Figures_09021_SC_mDC/Linear_Regressions/Forest_Lregression_Outcome(2categ).png",
+     height=2.7, width=8, units="in", res=600)
+
+Plot_Outcome.1  %>% filter(!Metabolism %in% c("Glyco_Cap", "FAAO")) %>% 
+  ggplot(aes(x= estimate , y= fct_reorder(Metabolism,-sig_value), xmin=conf.low, xmax=conf.high, label = sig_value)) +
+  geom_text(nudge_x = 0.0, nudge_y = 0.4, size=5,color = "black") +
+  geom_pointrange()+ # Makes range for ggplot values based on the data and AES specified in first line
+  geom_errorbar(aes(xmin=conf.low, xmax=conf.high), width=0, cex=0.7)+ # Makes whiskers on the range (more aesthetically pleasing)
+  #coord_flip() + # flip coordinates (puts labels on y axis)
+  geom_point(shape = 10, size = 2.5) + # specifies the size and shape of the geompoint
+  geom_vline(xintercept = 0, color = "red", linetype = "dashed", cex = 1, alpha = 0.5) +
+  ggtitle("SCENITH (2 binary) Outcome Linear Regression")+ # Blank Title for the Graph
+  xlab(" (95% CI)") + 
+  ylab("SCENITH Parameter") +
+   theme(aspect.ratio = 1/2,
+        plot.title = element_text(size = 14, face = "bold"),
+        line = element_line(colour = "black", size = 2), # My personal theme for GGplots
+        strip.background = element_rect(fill=NA), 
+        legend.position ="none", 
+        axis.line.x = element_line(colour = "black"), 
+        axis.line.y = element_blank(), 
+        panel.border= element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        panel.background = element_blank(),
+        axis.text.y = element_text(face="plain", color="black",size=14),  # to label y-axis tics/number labels
+        axis.text.x = element_text(face="plain", color="black",size=14),  # to label y-axis tics/number labels
+        axis.title.x = element_text(face="plain", color="black",size=12, angle = 0,vjust = 0),
+        axis.title.y = element_text(face="plain", color="black",size=14,vjust = 0),                                    
+        axis.ticks = element_blank())
+dev.off() 
+```
+
+
+# ----------------------------
+# ----------------------------
+# ----------------------------
+# Cox OS & PFS Regression Metabolism mDC
+```{r Cox regression hazard risk ratio analysis}
+# Cox regression hazard risk ratio analysis
+##############
+##############
+library(ggplot2)
+library(ggpubr)
+library(dplyr)
+library(survival)
+library(ranger)
+library(ggfortify)
+library(survminer)
+##############
+############## Exploration of correlations
+# Here I Log10 transform values for Metabolic Parameters
+Data_Puro_Calc_Clin_Tidy %>% 
+  ggplot(aes(x= Overal_Survival , y= Value)) +
+  geom_point(aes(color = Response)) +
+    scale_color_manual(values = c(cols.Response.assign))+
+    geom_smooth(method = "lm", se=FALSE) +
+  stat_cor(method = "spearman", label.y = 8, size=3)+facet_wrap(~Metabolism)
+###############
+tidy_All_nest <- Data_Puro_Calc_Clin_Tidy %>%  filter(Response != "HD") %>%  
+  filter(!Metabolism %in% c("Glycolytic Capacity","FAAO")) %>% 
+  mutate(Value_log = normalize(Value)+0.01) %>% 
+  group_by(Metabolism) %>% 
+  nest() 
+
+Model_Cox_OS <- tidy_All_nest %>% 
+  mutate(model = map(data, ~ coxph(Surv(Overal_Survival, death_ind) ~ Value_log, data = .x)))
+
+Unnest_Model_Cox_OS <- Model_Cox_OS %>% 
+  mutate(coef = map(model, ~tidy(.x,conf.int = TRUE))) %>% 
+  unnest(coef) 
+####
+# Round p.values to 3 Sig figs
+Unnest_Model_Cox_OS <- Unnest_Model_Cox_OS %>% 
+  mutate(sig_value=round(p.value,3))
+
+png("../Figures_09021_SC_mDC/COX_OS/COX_OS_Continous_SCENITH.png",
+     height=3, width=8, units="in", res=600)
+Unnest_Model_Cox_OS %>% #filter(!Metabolism %in% c("FAAO")) %>% 
+  ggplot(aes(x= estimate , y= fct_reorder(Metabolism,-sig_value), xmin=conf.low, xmax=conf.high, label = sig_value)) +
+  geom_text(nudge_x = 0.0, nudge_y = 0.4, size=5,color = "black") +
+  geom_pointrange()+ # Makes range for ggplot values based on the data and AES specified in first line
+  geom_errorbar(aes(xmin=conf.low, xmax=conf.high), width=0, cex=0.7)+ # Makes whiskers on the range (more aesthetically pleasing)
+  #coord_flip() + # flip coordinates (puts labels on y axis)
+  geom_point(shape = 10, size = 2.5) + # specifies the size and shape of the geompoint
+  geom_vline(xintercept = 1, color = "red", linetype = "dashed", cex = 1, alpha = 0.5) +
+  ggtitle("OS SCENITH COX Regression")+ # Blank Title for the Graph
+  xlab(" (95% CI)") + 
+  ylab("Metabolism") +
+   theme(aspect.ratio = 1/2,
+        plot.title = element_text(size = 14, face = "bold"),
+        line = element_line(colour = "black", size = 2), # My personal theme for GGplots
+        strip.background = element_rect(fill=NA), 
+        legend.position ="none", 
+        axis.line.x = element_line(colour = "black"), 
+        axis.line.y = element_blank(), 
+        panel.border= element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        panel.background = element_blank(),
+        axis.text.y = element_text(face="plain", color="black",size=14),  # to label y-axis tics/number labels
+        axis.text.x = element_text(face="plain", color="black",size=14),  # to label y-axis tics/number labels
+        axis.title.x = element_text(face="plain", color="black",size=12, angle = 0,vjust = 0),
+        axis.title.y = element_text(face="plain", color="black",size=14,vjust = 0),                                    
+        axis.ticks = element_blank())
+dev.off() 
+
+##############
+
+Model_Cox_PFS <- tidy_All_nest %>% 
+  mutate(model = map(data, ~ coxph(Surv(PF_Survival, PFS_ind) ~ Value_log, data = .x)))
+
+Unnest_Model_Cox_PFS <- Model_Cox_PFS %>% 
+  mutate(coef = map(model, ~tidy(.x,conf.int = TRUE))) %>% 
+  unnest(coef) 
+
+####
+# Round p.values to 3 Sig figs
+Unnest_Model_Cox_PFS <- Unnest_Model_Cox_PFS %>% 
+  mutate(sig_value=round(p.value,3))
+
+png("../Figures_09021_SC_mDC/COX_OS/COX_PFS_Continous_SCENITH.png",
+     height=3, width=8, units="in", res=600)
+Unnest_Model_Cox_PFS %>% 
+  ggplot(aes(x= estimate , y= fct_reorder(Metabolism,-sig_value), xmin=conf.low, xmax=conf.high, label = sig_value)) +
+  geom_text(nudge_x = 0.0, nudge_y = 0.4, size=5,color = "black") +
+  geom_pointrange()+ # Makes range for ggplot values based on the data and AES specified in first line
+  geom_errorbar(aes(xmin=conf.low, xmax=conf.high), width=0, cex=0.7)+ # Makes whiskers on the range (more aesthetically pleasing)
+  #coord_flip() + # flip coordinates (puts labels on y axis)
+  geom_point(shape = 10, size = 2.5) + # specifies the size and shape of the geompoint
+  geom_vline(xintercept = 0, color = "red", linetype = "dashed", cex = 1, alpha = 0.5) +
+  ggtitle("PFS SCENITH COX Regression")+ # Blank Title for the Graph
+  xlab(" (95% CI)") + 
+  ylab("Metabolism") +
+   theme(aspect.ratio = 1/2,
+        plot.title = element_text(size = 14, face = "bold"),
+        line = element_line(colour = "black", size = 2), # My personal theme for GGplots
+        strip.background = element_rect(fill=NA), 
+        legend.position ="none", 
+        axis.line.x = element_line(colour = "black"), 
+        axis.line.y = element_blank(), 
+        panel.border= element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        panel.background = element_blank(),
+        axis.text.y = element_text(face="plain", color="black",size=14),  # to label y-axis tics/number labels
+        axis.text.x = element_text(face="plain", color="black",size=14),  # to label y-axis tics/number labels
+        axis.title.x = element_text(face="plain", color="black",size=12, angle = 0,vjust = 0),
+        axis.title.y = element_text(face="plain", color="black",size=14,vjust = 0),                                    
+        axis.ticks = element_blank())
+dev.off()
+##############
+```
+
+# OS Survival data
+```{r}
+library("survival")
+library("survminer")
+#Determine cut off value for selcting high and low values for metabolic parameters
+res.cut.OS <- surv_cutpoint(Data_Puro_Calc_Clin, time = "Overal_Survival", event = "death_ind",
+                         variables = c("Glucose_Dep","Mito_Dep","FAO_Dep","Glnlysis_Dep","Glyco_Cap"))
+# palette = "npg" (nature publishing group), see ?ggpubr::ggpar
+
+png("../Figures_09021_SC_mDC/Survival/Cutoff_SCENITH_Glucose_Dep.png",height=5, width=6, units="in", res=600)
+plot(res.cut.OS, c("Glucose_Dep"), palette = "npg")
+dev.off() 
+png("../Figures_09021_SC_mDC/Survival/Cutoff_SCENITH_Mito_Dep.png",height=5, width=6, units="in", res=600)
+plot(res.cut.OS, c("Mito_Dep"), palette = "npg")
+dev.off() 
+png("../Figures_09021_SC_mDC/Survival/Cutoff_SCENITH_FAO_Dep.png",height=5, width=6, units="in", res=600)
+plot(res.cut.OS, c("FAO_Dep"), palette = "npg")
+dev.off() 
+png("../Figures_09021_SC_mDC/Survival/Cutoff_SCENITH_Glnlysis_Dep.png",height=5, width=6, units="in", res=600)
+plot(res.cut.OS, c("Glnlysis_Dep"), palette = "npg")
+dev.off() 
+```
+
+# OS Survival Plots SCENITH
+```{r}
+res.cat.OS <- surv_categorize(res.cut.OS)
+summary(res.cat.OS)
+
+# gsurvplot(fit, data = res.cat, risk.table = TRUE, conf.int = TRUE)
+fit1 <- survfit(Surv(Overal_Survival, death_ind) ~Glucose_Dep, data = res.cat.OS)
+
+png("../Figures_09021_SC_mDC/Survival/Survival_SCENITH_Glucose_Dep.png",height=6.25, width=4.25, units="in", res=600)
+ggsurvplot(fit1, data = res.cat.OS,
+           title = "Survival Curves",
+           pval = TRUE, pval.method = TRUE,    # Add p-value &  method name
+           surv.median.line = "hv",            # Add median survival lines
+           legend.title = "Glucose Dependence",  # Change legend titles
+           legend.labs = c("High", "Low"),  # Change legend labels
+           palette = "npg",                    # Use JCO journal color palette
+           risk.table = TRUE,                  # Add No at risk table
+           cumevents = TRUE,                   # Add cumulative No of events table
+           tables.height = 0.2,               # Specify tables height
+           tables.theme = theme_cleantable(),  # Clean theme for tables
+           tables.y.text = FALSE               # Hide tables y axis text
+)
+dev.off() 
+
+fit2 <- survfit(Surv(Overal_Survival, death_ind) ~Mito_Dep, data = res.cat.OS)
+
+png("../Figures_09021_SC_mDC/Survival/Survival_SCENITH_Mito_Dep.png",height=6.25, width=4.25, units="in", res=600)
+ggsurvplot(fit2, data = res.cat.OS,
+           title = "Survival Curves",
+           pval = TRUE, pval.method = TRUE,    # Add p-value &  method name
+           surv.median.line = "hv",            # Add median survival lines
+           legend.title = "Mitochondrial Dependence",  # Change legend titles
+           legend.labs = c("High", "Low"),  # Change legend labels
+           palette = "npg",                    # Use JCO journal color palette
+           risk.table = TRUE,                  # Add No at risk table
+           cumevents = TRUE,                   # Add cumulative No of events table
+           tables.height = 0.2,               # Specify tables height
+           tables.theme = theme_cleantable(),  # Clean theme for tables
+           tables.y.text = FALSE               # Hide tables y axis text
+)
+dev.off() 
+
+fit3 <- survfit(Surv(Overal_Survival, death_ind) ~FAO_Dep, data = res.cat.OS)
+png("../Figures_09021_SC_mDC/Survival/Survival_SCENITH_FAO_Dep.png",height=6.25, width=4.25, units="in", res=600)
+ggsurvplot(fit3, data = res.cat.OS,
+           title = "Survival Curves",
+           pval = TRUE, pval.method = TRUE,    # Add p-value &  method name
+           surv.median.line = "hv",            # Add median survival lines
+           legend.title = "FAO Dependence",  # Change legend titles
+           legend.labs = c("High", "Low"),  # Change legend labels
+           palette = "npg",                    # Use JCO journal color palette
+           risk.table = TRUE,                  # Add No at risk table
+           cumevents = TRUE,                   # Add cumulative No of events table
+           tables.height = 0.2,               # Specify tables height
+           tables.theme = theme_cleantable(),  # Clean theme for tables
+           tables.y.text = FALSE               # Hide tables y axis text
+)
+dev.off() 
+
+fit4 <- survfit(Surv(Overal_Survival, death_ind) ~Glnlysis_Dep, data = res.cat.OS)
+
+png("../Figures_09021_SC_mDC/Survival/Survival_SCENITH_Glnlysis_Dep.png",height=6.25, width=4.25, units="in", res=600)
+ggsurvplot(fit4, data = res.cat.OS,
+           title = "Survival Curves",
+           pval = TRUE, pval.method = TRUE,    # Add p-value &  method name
+           surv.median.line = "hv",            # Add median survival lines
+           legend.title = "Glutaminolysis Dependence",  # Change legend titles
+           legend.labs = c("High", "Low"),  # Change legend labels
+           palette = "npg",                    # Use JCO journal color palette
+           risk.table = TRUE,                  # Add No at risk table
+           cumevents = TRUE,                   # Add cumulative No of events table
+           tables.height = 0.2,               # Specify tables height
+           tables.theme = theme_cleantable(),  # Clean theme for tables
+           tables.y.text = FALSE               # Hide tables y axis text
+)
+dev.off()
+```
+
+# COX OS binary metabolism
+```{r}
+#COX regression based on Categories (High and Low)
+res.cat.gath <- res.cat.OS %>% gather(Metabolism, Value, Glucose_Dep:Glnlysis_Dep)
+
+res.cat.gath <- res.cat.gath %>% 
+  mutate(Value_Rank = case_when(
+  Value %in% c("high") ~ 2,
+  Value %in% c("low") ~ 1
+))
+
+tidy_Metab_nest <- res.cat.gath %>%   group_by(Metabolism) %>% 
+  nest() 
+
+Model_Cox_OS <- tidy_Metab_nest %>% 
+  mutate(model = map(data, ~ coxph(Surv(Overal_Survival, death_ind) ~ Value_Rank, data = .x)))
+
+Unnest_Model_Cox_OS <- Model_Cox_OS %>% 
+  mutate(coef = map(model, ~tidy(.x,conf.int = TRUE))) %>% 
+  unnest(coef) 
+####
+# Round p.values to 3 Sig figs
+Unnest_Model_Cox_OS <- Unnest_Model_Cox_OS %>% 
+  mutate(sig_value=round(p.value,4))
+
+ggforest(Unnest_Model_Cox_OS)
+png("../Figures_09021_SC_mDC/COX_OS/COX_binary_OS_SCENITH.png",height=6.25, width=5.25, units="in", res=600)
+Unnest_Model_Cox_OS %>% #filter(!Metabolism %in% c("FAAO")) %>% 
+  ggplot(aes(x= estimate , y= fct_reorder(Metabolism,-sig_value), xmin=conf.low, xmax=conf.high, label = sig_value)) +
+  geom_text(nudge_x = 0.0, nudge_y = 0.4, size=5,color = "black") +
+  geom_pointrange()+ # Makes range for ggplot values based on the data and AES specified in first line
+  geom_errorbar(aes(xmin=conf.low, xmax=conf.high), width=0, cex=0.7)+ # Makes whiskers on the range (more aesthetically pleasing)
+  #coord_flip() + # flip coordinates (puts labels on y axis)
+  geom_point(shape = 10, size = 2.5) + # specifies the size and shape of the geompoint
+  geom_vline(xintercept = 0, color = "red", linetype = "dashed", cex = 1, alpha = 0.5) +
+  ggtitle("OS SCENITH HR Binary")+ # Blank Title for the Graph
+  xlab(" (95% CI)") + 
+  ylab("Metabolism") +
+  theme(aspect.ratio = 1/2,
+        plot.title = element_text(size = 14, face = "bold"),
+        line = element_line(colour = "black", size = 2), # My personal theme for GGplots
+        strip.background = element_rect(fill=NA), 
+        legend.position ="none", 
+        axis.line.x = element_line(colour = "black"), 
+        axis.line.y = element_blank(), 
+        panel.border= element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        panel.background = element_blank(),
+        axis.text.y = element_text(face="plain", color="black",size=14),  # to label y-axis tics/number labels
+        axis.text.x = element_text(face="plain", color="black",size=14),  # to label y-axis tics/number labels
+        axis.title.x = element_text(face="plain", color="black",size=12, angle = 0,vjust = 0),
+        axis.title.y = element_text(face="plain", color="black",size=14,vjust = 0),                                    
+        axis.ticks = element_blank())
+dev.off() 
+
+```
+
+# ----------------------------
+# PFS Survival data
+```{r}
+Data_Puro_Calc_Clin$PFS_ind
+#Determine cut off value for selcting high and low values for metabolic parameters
+res.cut.BBB <- surv_cutpoint(Data_Puro_Calc_Clin, time = "PF_Survival", event = "PFS_ind",
+                         variables = c("Glucose_Dep","Mito_Dep","FAO_Dep","Glnlysis_Dep"))
+
+png("../Figures_09021_SC_mDC/Survival/PFS_Cutoff_SCENITH_Glucose_Dep.png",height=5, width=6, units="in", res=600)
+plot(res.cut.BBB, c("Glucose_Dep"), palette = "npg")
+dev.off() 
+png("../Figures_09021_SC_mDC/Survival/PFS_Cutoff_SCENITH_Mito_Dep.png",height=5, width=6, units="in", res=600)
+plot(res.cut.BBB, c("Mito_Dep"), palette = "npg")
+dev.off() 
+png("../Figures_09021_SC_mDC/Survival/PFS_Cutoff_SCENITH_FAO_Dep.png",height=5, width=6, units="in", res=600)
+plot(res.cut.BBB, c("FAO_Dep"), palette = "npg")
+dev.off() 
+png("../Figures_09021_SC_mDC/Survival/PFS_Cutoff_SCENITH_Glnlysis_Dep.png",height=5, width=6, units="in", res=600)
+plot(res.cut.BBB, c("Glnlysis_Dep"), palette = "npg")
+dev.off() 
+png("../Figures_09021_SC_mDC/Survival/PFS_Cutoff_SCENITH_Glnlysis_Dep.png",height=5, width=6, units="in", res=600)
+plot(res.cut.BBB, c("Glnlysis_Dep"), palette = "npg")
+dev.off() 
+```
+
+# PFS Survival Plots SCENITH
+```{r}
+res.cat <- surv_categorize(res.cut.BBB)
+summary(res.cut.BBB)
+
+# gsurvplot(fit, data = res.cat, risk.table = TRUE, conf.int = TRUE)
+fitA <- survfit(Surv(PF_Survival, PFS_ind) ~Glucose_Dep, data = res.cat)
+
+png("../Figures_09021_SC_mDC/Survival/PFS_Survival_SCENITH_Glucose_Dep.png",height=6.25, width=4.25, units="in", res=600)
+ggsurvplot(fitA, data = res.cat,
+           title = "Survival Curves",
+           pval = TRUE, pval.method = TRUE,    # Add p-value &  method name
+           surv.median.line = "hv",            # Add median survival lines
+           legend.title = "Glucose Dependence",  # Change legend titles
+           legend.labs = c("High", "Low"),  # Change legend labels
+           palette = "npg",                    # Use JCO journal color palette
+           risk.table = TRUE,                  # Add No at risk table
+           cumevents = TRUE,                   # Add cumulative No of events table
+           tables.height = 0.2,               # Specify tables height
+           tables.theme = theme_cleantable(),  # Clean theme for tables
+           tables.y.text = FALSE               # Hide tables y axis text
+)
+dev.off() 
+
+fitB <- survfit(Surv(PF_Survival, PFS_ind) ~Mito_Dep, data = res.cat)
+
+png("../Figures_09021_SC_mDC/Survival/PFS_Survival_SCENITH_Mito_Dep.png",height=6.25, width=4.25, units="in", res=600)
+ggsurvplot(fitB, data = res.cat,
+           title = "Survival Curves",
+           pval = TRUE, pval.method = TRUE,    # Add p-value &  method name
+           surv.median.line = "hv",            # Add median survival lines
+           legend.title = "Mitochondrial Dependence",  # Change legend titles
+           legend.labs = c("High", "Low"),  # Change legend labels
+           palette = "npg",                    # Use JCO journal color palette
+           risk.table = TRUE,                  # Add No at risk table
+           cumevents = TRUE,                   # Add cumulative No of events table
+           tables.height = 0.2,               # Specify tables height
+           tables.theme = theme_cleantable(),  # Clean theme for tables
+           tables.y.text = FALSE               # Hide tables y axis text
+)
+dev.off() 
+
+fitC <- survfit(Surv(PF_Survival, PFS_ind) ~FAO_Dep, data = res.cat)
+png("../Figures_09021_SC_mDC/Survival/PFS_Survival_SCENITH_FAO_Dep.png",height=6.25, width=4.25, units="in", res=600)
+ggsurvplot(fitC, data = res.cat,
+           title = "Survival Curves",
+           pval = TRUE, pval.method = TRUE,    # Add p-value &  method name
+           surv.median.line = "hv",            # Add median survival lines
+           legend.title = "FAO Dependence",  # Change legend titles
+           legend.labs = c("High", "Low"),  # Change legend labels
+           palette = "npg",                    # Use JCO journal color palette
+           risk.table = TRUE,                  # Add No at risk table
+           cumevents = TRUE,                   # Add cumulative No of events table
+           tables.height = 0.2,               # Specify tables height
+           tables.theme = theme_cleantable(),  # Clean theme for tables
+           tables.y.text = FALSE               # Hide tables y axis text
+)
+dev.off() 
+
+fitD <- survfit(Surv(PF_Survival, PFS_ind) ~Glnlysis_Dep, data = res.cat)
+
+png("../Figures_09021_SC_mDC/Survival/PFS_Survival_SCENITH_Glnlysis_Dep.png",height=6.25, width=4.25, units="in", res=600)
+ggsurvplot(fitD, data = res.cat,
+           title = "Survival Curves",
+           pval = TRUE, pval.method = TRUE,    # Add p-value &  method name
+           surv.median.line = "hv",            # Add median survival lines
+           legend.title = "Glutaminolysis Dependence",  # Change legend titles
+           legend.labs = c("High", "Low"),  # Change legend labels
+           palette = "npg",                    # Use JCO journal color palette
+           risk.table = TRUE,                  # Add No at risk table
+           cumevents = TRUE,                   # Add cumulative No of events table
+           tables.height = 0.2,               # Specify tables height
+           tables.theme = theme_cleantable(),  # Clean theme for tables
+           tables.y.text = FALSE               # Hide tables y axis text
+)
+dev.off()
+```
+
+# COX PFS binary metabolism
+```{r}
+#COX regression based on Categories (High and Low)
+res.cat.PFS <- surv_categorize(res.cut.BBB)
+summary(res.cat.PFS)
+
+PFS.res.cat.gath <- res.cat.PFS %>% gather(Metabolism, Value, Glucose_Dep:Glnlysis_Dep)
+
+PFS.res.cat.gath <- PFS.res.cat.gath %>% 
+  mutate(Value_Rank = case_when(
+  Value %in% c("high") ~ 2,
+  Value %in% c("low") ~ 1
+))
+
+tidy_Metab_nest <- PFS.res.cat.gath %>%   group_by(Metabolism) %>% 
+  nest() 
+
+Model_Cox_PFS <- tidy_Metab_nest %>% 
+  mutate(model = map(data, ~ coxph(Surv(PF_Survival, PFS_ind) ~ Value_Rank, data = .x)))
+
+Unnest_Model_Cox_PFS <- Model_Cox_PFS %>% 
+  mutate(coef = map(model, ~tidy(.x,conf.int = TRUE))) %>% 
+  unnest(coef) 
+####
+# Round p.values to 3 Sig figs
+Unnest_Model_Cox_PFS <- Unnest_Model_Cox_PFS %>% 
+  mutate(sig_value=round(p.value,4))
+
+png("../Figures_09021_SC_mDC/COX_OS/COX_binary_PFS_SCENITH.png",height=6.25, width=5.25, units="in", res=600)
+
+Unnest_Model_Cox_PFS %>% #filter(!Metabolism %in% c("FAAO")) %>% 
+  ggplot(aes(x= estimate , y= fct_reorder(Metabolism,-sig_value), xmin=conf.low, xmax=conf.high, label = sig_value)) +
+  geom_text(nudge_x = 0.0, nudge_y = 0.4, size=5,color = "black") +
+  geom_pointrange()+ # Makes range for ggplot values based on the data and AES specified in first line
+  geom_errorbar(aes(xmin=conf.low, xmax=conf.high), width=0, cex=0.7)+ # Makes whiskers on the range (more aesthetically pleasing)
+  #coord_flip() + # flip coordinates (puts labels on y axis)
+  geom_point(shape = 10, size = 2.5) + # specifies the size and shape of the geompoint
+  geom_vline(xintercept = 0, color = "red", linetype = "dashed", cex = 1, alpha = 0.5) +
+  ggtitle("OS SCENITH COX Regression")+ # Blank Title for the Graph
+  xlab(" (95% CI)") + 
+  ylab("Metabolism") +
+  theme(aspect.ratio = 1/2,
+        plot.title = element_text(size = 14, face = "bold"),
+        line = element_line(colour = "black", size = 2), # My personal theme for GGplots
+        strip.background = element_rect(fill=NA), 
+        legend.position ="none", 
+        axis.line.x = element_line(colour = "black"), 
+        axis.line.y = element_blank(), 
+        panel.border= element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        panel.background = element_blank(),
+        axis.text.y = element_text(face="plain", color="black",size=14),  # to label y-axis tics/number labels
+        axis.text.x = element_text(face="plain", color="black",size=14),  # to label y-axis tics/number labels
+        axis.title.x = element_text(face="plain", color="black",size=12, angle = 0,vjust = 0),
+        axis.title.y = element_text(face="plain", color="black",size=14,vjust = 0),                                    
+        axis.ticks = element_blank())
+dev.off() 
+```
+# ----------------------------
+# ----------------------------
+# IMMUNE
+# Plots of median marker expression 
+5 replicate wells are used for deriving median values
+```{r}
+LOG_JAFCM111_mdian %>% select(-PPARg) %>%  gather(Marker, Expression, HLA.DR:total.AMPK) %>% filter(Inhibitor %in% c("CTRL","O","E", "T", "Z")) %>% 
+  group_by(Marker,Patient_Info) %>%  
+  summarise(median = median(Expression,na.rm = TRUE),
+            sd = sd(Expression,na.rm = TRUE)) %>% 
+  #filter(population %in% c("cMo","iMo", "ncMo")) %>% 
+  ggplot(aes(x=Patient_Info, y=median))+
+  geom_bar(stat="identity", color="black",size=0.25,
+           position=position_dodge()) +
+  geom_errorbar(aes(ymin=median-sd, ymax=median+sd), width=.2,size=0.5,
+                position=position_dodge(.9))+
+  #scale_fill_manual(values=c(my_cols))+  
+   facet_wrap(~Marker , nrow = 5, scales = "free",strip.position="top")+
+ theme(
+    legend.position = "right", aspect.ratio = 1/1.25,
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(size = 13, face ="bold"),              # to label add individual box
+    strip.background =element_blank(), 
+    panel.border = element_rect(colour = "black", fill=NA, size=0.5),
+    # to color individual box
+    axis.text.x = element_text(face="bold", color="black",size=5, vjust = 0.2,angle = 90),
+    # to label x-axis tics/number labels
+    axis.text.y = element_text(face="plain", color="black",size=14),  # to label y-axis tics/number labels
+    axis.title.x= element_blank(),                                    # to label/remove x-axis labels
+    axis.title.y= element_text(face="plain", color="black",size=14),    # to label/remove y-axis labels
+    axis.ticks = element_line(colour = "black", size = 1))
+```
+
+# Clinical T cell response JOINING
+```{r}
+Immune_Mark_Calc <- LOG_JAFCM111_mdian %>% filter(Inhibitor %in% c("CTRL","O","E", "T", "Z")) %>% 
+  group_by(Patient_Info) %>%
+  dplyr::summarise(across(where(is.numeric), ~ median(.x, na.rm = TRUE))) %>% 
+  ungroup()
+
+Immune_Metab_DF <- Data_Puro_Calc_Clin %>% left_join(Immune_Mark_Calc, by = "Patient_Info")  
+Immune_Metab_DF.Tcell <- Immune_Metab_DF %>% left_join(T_cell_Resp %>%  select(Patient_Info,Bulk_Response_Per_Patient:Vaccine_Response,Prev.Therapy:CD8_CD4_COMBO), by = "Patient_Info")  
+glimpse(Puro_CLinical)
+```
+
+# Set levels Immune
+```{r}
+Immune_Metab_DF.Tcell$Response <- factor(Immune_Metab_DF.Tcell$Response, levels=c("HD","PR","SD","NED1","NED2","PD"))
+Immune_Metab_DF.Tcell$Outcome <- factor(Immune_Metab_DF.Tcell$Outcome, levels=c("HD","Good","Bad"))
+Immune_Metab_DF.Tcell$Outcome.1 <- factor(Immune_Metab_DF.Tcell$Outcome.1, levels=c("HD","Good","Stable","Bad"))
+Immune_Metab_DF.Tcell$CD8_Resp_Per_Patient <- factor(Immune_Metab_DF.Tcell$CD8_Resp_Per_Patient, levels=c("No","Yes"))
+Immune_Metab_DF.Tcell$CD4_Resp_Per_Patient <- factor(Immune_Metab_DF.Tcell$CD4_Resp_Per_Patient, levels=c("No","Yes"))
+Immune_Metab_DF.Tcell$CD8.CD4_Resp_Per_Patient <- factor(Immune_Metab_DF.Tcell$CD8.CD4_Resp_Per_Patient, levels=c("No","Yes"))
+```
+
+### --- Save Immune_Metab_DF.Tcell
+```{r}
+Immune_Metab_DF.Tcell %>%  write_csv("../09-021_SC_mDC_Tables/Immune_Metab_DF.Tcell.csv")
+```
+
+# Immune_Metab_Tidy & Normalization
+```{r}
+Immune_Metab_DF.Tcell %<>%  
+  mutate(`pAMPK:AMPK Ratio` = p.AMPK/total.AMPK,
+  `pmTOR:mTOR Ratio` = p.mTOR/total.mTOR,
+  `pAMPK:pmTOR Ratio` = p.AMPK/p.mTOR
+)
+glimpse(Immune_Metab_DF.Tcell)
+Immune_Metab_Tidy <- Immune_Metab_DF.Tcell %>% gather(IM_Markers, Expression, HLA.DR:total.AMPK,`pAMPK:AMPK Ratio`:`pAMPK:pmTOR Ratio`)
+# Normalize Immune data 
+Immune_Metab_Tidy %<>% mutate(Expression = normalize(Expression)+0.01) 
+Immune_Metab_Tidy$IM_Markers %>% unique()
+Metabolic_markers <- c("total.AMPK","p.AMPK","total.mTOR","p.mTOR", "pAMPK:AMPK Ratio","pmTOR:mTOR Ratio","pAMPK:pmTOR Ratio","Puromycin","PPARg")
+```
+# Cox Regression Immune Markers mDC
+```{r Cox regression hazard risk ratio analysis}
+# Cox regression hazard risk ratio analysis
+##############
+##############
+library(ggplot2)
+library(ggpubr)
+library(dplyr)
+library(survival)
+library(ranger)
+library(ggfortify)
+library(survminer)
+##############
+##############
+# Here I Log10 transform values for Metabolic Parameters
+Immune_Metab_Tidy %>% 
+  ggplot(aes(x= Overal_Survival , y= Expression)) +
+  geom_point(aes(color = Response)) +
+    scale_color_manual(values = c(cols.Response.assign))+
+    geom_smooth(method = "lm", se=FALSE) +
+  stat_cor(method = "spearman", label.y = 8, size=3)+facet_wrap(~Metabolism)
+###############
+
+IM_tidy_All_nest <- Immune_Metab_Tidy %>%  filter(Response != "HD") %>%  
+  group_by(IM_Markers) %>% 
+  nest()
+
+IM.Model_Cox_OS <- IM_tidy_All_nest %>% 
+  mutate(model = map(data, ~ coxph(Surv(Overal_Survival, death_ind) ~ Expression, data = .x)))
+
+IM.Unnest_Model_Cox_OS <- IM.Model_Cox_OS %>% 
+  mutate(coef = map(model, ~tidy(.x,conf.int = TRUE))) %>% 
+  unnest(coef) 
+####
+# Round p.values to 3 Sig figs
+IM.Unnest_Model_Cox_OS <- IM.Unnest_Model_Cox_OS %>% 
+  mutate(sig_value=round(p.value,3))
+
+png("../Figures_09021_SC_mDC/COX_OS/COX_OS_Immune_Continous_SC.png",
+     height=6, width=6, units="in", res=600)
+IM.Unnest_Model_Cox_OS %>% filter(!IM_Markers %in% c(Metabolic_markers)) %>% 
+  ggplot(aes(x= estimate , y= fct_reorder(IM_Markers,-sig_value), xmin=conf.low, xmax=conf.high, label = sig_value)) +
+  geom_text(nudge_x = 0.0, nudge_y = 0.4, size=5,color = "black") +
+  geom_pointrange()+ # Makes range for ggplot values based on the data and AES specified in first line
+  geom_errorbar(aes(xmin=conf.low, xmax=conf.high), width=0, cex=0.7)+ # Makes whiskers on the range (more aesthetically pleasing)
+  scale_y_discrete(expand = expansion(mult = c(0.05, 0.1)))+
+  geom_point(shape = 10, size = 2.5) + # specifies the size and shape of the geompoint
+  geom_vline(xintercept = 1, color = "red", linetype = "dashed", cex = 1, alpha = 0.5) +
+  ggtitle("OS SCENITH Immune continous COX")+ # Blank Title for the Graph
+  xlab(" (95% CI)") + 
+  ylab("IM_Markers") +
+   theme(aspect.ratio = 1/1.5,
+        plot.title = element_text(size = 14, face = "bold"),
+        line = element_line(colour = "black", size = 2), # My personal theme for GGplots
+        strip.background = element_rect(fill=NA), 
+        legend.position ="none", 
+        axis.line.x = element_line(colour = "black"), 
+        axis.line.y = element_blank(), 
+        panel.border= element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        panel.background = element_blank(),
+        axis.text.y = element_text(face="plain", color="black",size=14),  # to label y-axis tics/number labels
+        axis.text.x = element_text(face="plain", color="black",size=14),  # to label y-axis tics/number labels
+        axis.title.x = element_text(face="plain", color="black",size=12, angle = 0,vjust = 0),
+        axis.title.y = element_text(face="plain", color="black",size=14,vjust = 0),                                    
+        axis.ticks = element_blank())
+dev.off() 
+
+##############
+
+IM.Model_Cox_PFS <- IM_tidy_All_nest %>% 
+  mutate(model = map(data, ~ coxph(Surv(PF_Survival, PFS_ind) ~ Expression, data = .x)))
+
+IM.Unnest_Model_Cox_PFS <- IM.Model_Cox_PFS %>% 
+  mutate(coef = map(model, ~tidy(.x,conf.int = TRUE))) %>% 
+  unnest(coef) 
+
+####
+# Round p.values to 3 Sig figs
+IM.Unnest_Model_Cox_PFS <- IM.Unnest_Model_Cox_PFS %>% 
+  mutate(sig_value=round(p.value,3))
+
+# png("../09-021_SC_mDC_Figures/COX_PFS_SCENITH_Immune.png",
+#      height=3, width=8, units="in", res=600)
+IM.Unnest_Model_Cox_PFS
+
+png("../Figures_09021_SC_mDC/COX_OS/COX_PFS_Immune_Continous_SC.png",
+     height=6, width=6, units="in", res=600)
+IM.Unnest_Model_Cox_PFS %>% filter(!IM_Markers %in% c(Metabolic_markers)) %>% 
+  ggplot(aes(x= estimate , y= fct_reorder(IM_Markers,-sig_value), xmin=conf.low, xmax=conf.high, label = sig_value)) +
+  geom_text(nudge_x = 0.0, nudge_y = 0.4, size=5,color = "black") +
+  geom_pointrange()+ # Makes range for ggplot values based on the data and AES specified in first line
+  geom_errorbar(aes(xmin=conf.low, xmax=conf.high), width=0, cex=0.7)+ # Makes whiskers on the range (more aesthetically pleasing)
+  scale_y_discrete(expand = expansion(mult = c(0.05, 0.1)))+
+  geom_point(shape = 10, size = 2.5) + # specifies the size and shape of the geompoint
+  geom_vline(xintercept = 1, color = "red", linetype = "dashed", cex = 1, alpha = 0.5) +
+  ggtitle("PFS SCENITH Immune continous COX")+ # Blank Title for the Graph
+  xlab(" (95% CI)") + 
+  ylab("IM_Markers") +
+   theme(aspect.ratio = 1/1.5,
+        plot.title = element_text(size = 14, face = "bold"),
+        line = element_line(colour = "black", size = 2), # My personal theme for GGplots
+        strip.background = element_rect(fill=NA), 
+        legend.position ="none", 
+        axis.line.x = element_line(colour = "black"), 
+        axis.line.y = element_blank(), 
+        panel.border= element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        panel.background = element_blank(),
+        axis.text.y = element_text(face="plain", color="black",size=14),  # to label y-axis tics/number labels
+        axis.text.x = element_text(face="plain", color="black",size=14),  # to label y-axis tics/number labels
+        axis.title.x = element_text(face="plain", color="black",size=12, angle = 0,vjust = 0),
+        axis.title.y = element_text(face="plain", color="black",size=14,vjust = 0),                                    
+        axis.ticks = element_blank())
+dev.off() 
+##############
+```
+
+# ----------------------------
+#3. BOX Immune
+```{r}
+# test if data is normally distributed
+Test_X <- Immune_Metab_Tidy %>% 
+    group_by(Outcome, IM_Markers)  %>% 
+    do(tidy(shapiro.test(.$Expression))) %>% 
+    ungroup() %>% 
+    select(-method)
+Test_X
+Test_X %<>% mutate(Normality = case_when(
+    p.value > 0.05 ~ "Normal",
+  p.value < 0.05 ~ "Not.Normal"
+))
+Test_X # These are normally distributed data 
+Test_X %>% filter(Normality == "Normal")
+dput(as.character(Test_X %>% filter(Normality == "Not.Normal") %>%  pull(IM_Markers)))
+
+# use for Wilcoxon test 
+Imm_Wilcoxon_markeres <- c("ILT3", "PD.L1", "PPARg", "CD206", "CD40", "CD86", "CD98", 
+"HLA.DR", "ILT3", "PD.L1")
+###  Comparison between outcome groups
+
+# filter(!IM_Markers %in% c(Metabolic_markers)) %>% 
+AAA_t_test <- Immune_Metab_Tidy %>% filter(Response != "HD") %>% 
+  group_by(IM_Markers) %>%   filter(!IM_Markers %in% c(Imm_Wilcoxon_markeres)) %>% 
+  t_test(Expression ~ Outcome) %>% add_y_position()
+
+# MArkers for I used wilcox_test for the analysis
+AAA_wilcox_test <- Immune_Metab_Tidy %>% filter(Response != "HD") %>% 
+  group_by(IM_Markers) %>%   filter(IM_Markers %in% c(Imm_Wilcoxon_markeres)) %>% 
+  wilcox_test(Expression ~ Outcome) %>% add_y_position()
+
+png("../Figures_09021_SC_mDC/BOX/BOX_Immune_Outcome(2cat).png",
+    height=3, width=25, units="in", res=600)
+Immune_Metab_Tidy %>%  filter(Response != "HD") %>% 
+  ggplot(aes(x = Outcome, y = Expression)) +
+        geom_boxplot(outlier.colour = NA, col = "grey50", alpha = 0.7) +
+    geom_jitter(position = jitter_0, shape=21,color="black",size = 2, alpha = 0.5,    aes(color=Response,fill=Response))+
+  scale_color_manual(values = c(cols.Response.assign))+
+  scale_fill_manual(values = c(cols.Response.assign))+
+  stat_pvalue_manual(AAA_t_test, label = "p", tip.length = 0,
+                     vjust = 0.01,
+                     size=3,
+                     hide.ns = FALSE)+
+    stat_pvalue_manual(AAA_wilcox_test, label = "p", tip.length = 0,
+                     vjust = 0.01,
+                     size=3,
+                     hide.ns = FALSE)+
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.15)))+
+  theme_bw() +
+  facet_wrap(~IM_Markers, scales = "free_y", nrow = 1,
+             labeller = label_wrap_gen(width = 4, multi_line = TRUE)) +
+   ggtitle("Immune Marker Expression Outcome")+ 
+  theme(
+  legend.position = "right", aspect.ratio = 1.25/1,
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  strip.text = element_text(size = 7.5, face ="bold"),              # to label add individual box
+  strip.background =element_blank(), 
+  panel.border = element_rect(colour = "black", fill=NA, size=0.5),
+  # to color individual box
+  axis.text.x = element_text(face="plain", color="black",size=10),
+  # to label x-axis tics/number labels
+  axis.text.y = element_text(face="plain", color="black",size=10),  # to label y-axis tics/number labels
+  axis.title.x= element_blank(),                                    # to label/remove x-axis labels
+  axis.title.y= element_text(face="plain", color="black",size=10),    # to label/remove y-axis labels
+  axis.ticks = element_line(colour = "black", size = 1))
+dev.off()
+
+Metabolic_markers
+
+AAA_t_test <- Immune_Metab_Tidy %>% filter(Response != "HD") %>% 
+  filter(IM_Markers %in% c("Puromycin")) %>% 
+  group_by(IM_Markers) %>%  
+  t_test(Expression ~ Outcome) %>% add_y_position()
+
+
+png("../Figures_09021_SC_mDC/BOX/BOX_Immune_Outcome(2cat)_Metab_1.png",
+    height=2.5, width=2.5, units="in", res=600)
+Immune_Metab_Tidy %>%  filter(Response != "HD") %>% filter(IM_Markers %in% c("Puromycin")) %>% 
+  ggplot(aes(x = Outcome, y = Expression)) +
+        geom_boxplot(outlier.colour = NA, col = "grey50", alpha = 0.7) +
+    geom_jitter(position = jitter_0, shape=21,color="black",size = 2, alpha = 0.5,    aes(color=Response,fill=Response))+
+  scale_color_manual(values = c(cols.Response.assign))+
+  scale_fill_manual(values = c(cols.Response.assign))+
+  stat_pvalue_manual(AAA_t_test, label = "p", tip.length = 0,
+                     vjust = 0.01,
+                     size=3,
+                     hide.ns = FALSE)+
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.15)))+
+  theme_bw() +
+  facet_wrap(~IM_Markers, scales = "free_y", nrow = 1,
+             labeller = label_wrap_gen(width = 4, multi_line = TRUE)) +
+   ggtitle("Immune Marker Expression Outcome")+ 
+  theme(
+  legend.position = "right", aspect.ratio = 1.25/1,
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  strip.text = element_text(size = 7.5, face ="bold"),              # to label add individual box
+  strip.background =element_blank(), 
+  panel.border = element_rect(colour = "black", fill=NA, size=0.5),
+  # to color individual box
+  axis.text.x = element_text(face="plain", color="black",size=10),
+  # to label x-axis tics/number labels
+  axis.text.y = element_text(face="plain", color="black",size=10),  # to label y-axis tics/number labels
+  axis.title.x= element_blank(),                                    # to label/remove x-axis labels
+  axis.title.y= element_text(face="plain", color="black",size=10),    # to label/remove y-axis labels
+  axis.ticks = element_line(colour = "black", size = 1))
+dev.off()
+
+```
+
+# ----------------------------
+### 4.Linear Regression IMMUNE
+2 outcome groups (Good, Bad)
+```{r}
+Immune_Metab_Tidy.model <- Immune_Metab_Tidy %>%  filter(Response != "HD") %>%  
+  mutate(Outcome.1_Rank = case_when(
+  Outcome %in% c("Good") ~ 2,
+  Outcome %in% c("Bad") ~ 1
+))
+
+Pre.lm_full <- Immune_Metab_Tidy.model %>% nest(data=-IM_Markers) %>%  
+  #filter(Cell.Type != "CD8:Treg Ratio") %>% 
+	mutate(
+		lm_out_full = map(data, ~lm(Outcome.1_Rank ~ Expression, data=.x %>% filter(!is.na(Outcome.1_Rank)) %>% mutate(Outcome.1_Rank=as.numeric(Outcome.1_Rank)))),
+		pval_full = map_dbl(lm_out_full, ~.x %>% broom::tidy() %>% filter(term=="Expression") %>% pull(p.value)),
+	)
+
+Pre.lm_full %>% select(-data, -lm_out_full) %>% arrange(pval_full)
+
+Plot_Outcome.1 <- Pre.lm_full %>% mutate(tidied = map(lm_out_full,conf.int = TRUE, tidy)) %>% 
+  unnest(tidied) %>% select(-data, -lm_out_full) %>% filter(term == "Expression") %>%  mutate_if(is.character,as.factor) %>% arrange(pval_full) 
+
+Plot_Outcome.1 %<>% mutate(sig_value=round(p.value,3))
+
+png("../Figures_09021_SC_mDC/Linear_Regressions/Forest_LR_Immune_2.groups.png",
+     height=7, width=8, units="in", res=600)
+Plot_Outcome.1  %>%  filter(!IM_Markers %in% c(Metabolic_markers)) %>% 
+  ggplot(aes(x= estimate , y= fct_reorder(IM_Markers,-sig_value), xmin=conf.low, xmax=conf.high, label = sig_value)) +
+  geom_text(nudge_x = 0.0, nudge_y = 0.4, size=5,color = "black") +
+  geom_pointrange()+ # Makes range for ggplot values based on the data and AES specified in first line
+  geom_errorbar(aes(xmin=conf.low, xmax=conf.high), width=0, cex=0.7)+ # Makes whiskers on the range (more aesthetically pleasing)
+  scale_y_discrete(expand = expansion(mult = c(0.05, 0.1)))+
+  geom_point(shape = 10, size = 2.5) + # specifies the size and shape of the geompoint
+  geom_vline(xintercept = 0, color = "red", linetype = "dashed", cex = 1, alpha = 0.5) +
+  ggtitle("IMMUNE SC Clinical 2 Outcome Linear R")+ # Blank Title for the Graph
+  xlab(" (95% CI)") + 
+  ylab("Marker") +
+   theme(aspect.ratio = 1/1.5,
+        plot.title = element_text(size = 14, face = "bold"),
+        line = element_line(colour = "black", size = 2), # My personal theme for GGplots
+        strip.background = element_rect(fill=NA), 
+        legend.position ="none", 
+        axis.line.x = element_line(colour = "black"), 
+        axis.line.y = element_blank(), 
+        panel.border= element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        panel.background = element_blank(),
+        axis.text.y = element_text(face="plain", color="black",size=14),  # to label y-axis tics/number labels
+        axis.text.x = element_text(face="plain", color="black",size=14),  # to label y-axis tics/number labels
+        axis.title.x = element_text(face="plain", color="black",size=12, angle = 0,vjust = 0),
+        axis.title.y = element_text(face="plain", color="black",size=14,vjust = 0),                                    
+        axis.ticks = element_blank())
+dev.off() 
+```
+
+### 3.Linear Regression IMMUNE
+3 outcome groups (HD, Good, Bad)
+```{r}
+Immune_Metab_Tidy.model <- Immune_Metab_Tidy %>% 
+  mutate(Outcome.1_Rank = case_when(
+  Outcome %in% c("HD") ~ 3,
+  Outcome %in% c("Good") ~ 2,
+  Outcome %in% c("Bad") ~ 1
+))
+Immune_Metab_Tidy.model$Expression
+
+Pre.lm_full <- Immune_Metab_Tidy.model %>% nest(data=-IM_Markers) %>%  
+  #filter(Cell.Type != "CD8:Treg Ratio") %>% 
+	mutate(
+		lm_out_full = map(data, ~lm(Outcome.1_Rank ~ Expression, data=.x %>% filter(!is.na(Outcome.1_Rank)) %>% mutate(Outcome.1_Rank=as.numeric(Outcome.1_Rank)))),
+		pval_full = map_dbl(lm_out_full, ~.x %>% broom::tidy() %>% filter(term=="Expression") %>% pull(p.value)),
+	)
+
+Pre.lm_full %>% select(-data, -lm_out_full) %>% arrange(pval_full)
+
+Plot_Outcome.2 <- Pre.lm_full %>% mutate(tidied = map(lm_out_full,conf.int = TRUE, tidy)) %>% 
+  unnest(tidied) %>% select(-data, -lm_out_full) %>% filter(term == "Expression") %>%  mutate_if(is.character,as.factor) %>% arrange(pval_full) 
+
+Plot_Outcome.2 %<>% mutate(sig_value=round(p.value,3))
+
+png("../Figures_09021_SC_mDC/Linear_Regressions/Forest_LR_Immune_3.groups.png",
+     height=7, width=8, units="in", res=600)
+Plot_Outcome.2  %>%  filter(IM_Markers %in% c(Metabolic_markers)) %>% 
+  ggplot(aes(x= estimate , y= fct_reorder(IM_Markers,-sig_value), xmin=conf.low, xmax=conf.high, label = sig_value)) +
+  geom_text(nudge_x = 0.0, nudge_y = 0.4, size=5,color = "black") +
+  geom_pointrange()+ # Makes range for ggplot values based on the data and AES specified in first line
+  geom_errorbar(aes(xmin=conf.low, xmax=conf.high), width=0, cex=0.7)+ # Makes whiskers on the range (more aesthetically pleasing)
+  scale_y_discrete(expand = expansion(mult = c(0.05, 0.1)))+
+  geom_point(shape = 10, size = 2.5) + # specifies the size and shape of the geompoint
+  geom_vline(xintercept = 0, color = "red", linetype = "dashed", cex = 1, alpha = 0.5) +
+  ggtitle("IMMUNE SC Clinical 3 Outcome Linear R")+ # Blank Title for the Graph
+  xlab(" (95% CI)") + 
+  ylab("Marker") +
+   theme(aspect.ratio = 1/1.5,
+        plot.title = element_text(size = 14, face = "bold"),
+        line = element_line(colour = "black", size = 2), # My personal theme for GGplots
+        strip.background = element_rect(fill=NA), 
+        legend.position ="none", 
+        axis.line.x = element_line(colour = "black"), 
+        axis.line.y = element_blank(), 
+        panel.border= element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        panel.background = element_blank(),
+        axis.text.y = element_text(face="plain", color="black",size=14),  # to label y-axis tics/number labels
+        axis.text.x = element_text(face="plain", color="black",size=14),  # to label y-axis tics/number labels
+        axis.title.x = element_text(face="plain", color="black",size=12, angle = 0,vjust = 0),
+        axis.title.y = element_text(face="plain", color="black",size=14,vjust = 0),                                    
+        axis.ticks = element_blank())
+dev.off() 
+```
+
+# Immune Plots based on T cell Response
+```{r}
+Theme.Tcell <-   theme(
+  legend.position = "right", aspect.ratio = 1.25/1,
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  strip.text = element_text(size = 9, face ="bold"),              # to label add individual box
+  strip.background =element_blank(), 
+  panel.border = element_rect(colour = "black", fill=NA, size=0.5),
+  # to color individual box
+  axis.text.x = element_text(face="plain", color="black",size=10),
+  # to label x-axis tics/number labels
+  axis.text.y = element_text(face="plain", color="black",size=10),  # to label y-axis tics/number labels
+  axis.title.x= element_blank(),                                    # to label/remove x-axis labels
+  axis.title.y= element_text(face="plain", color="black",size=10),    # to label/remove y-axis labels
+  axis.ticks = element_line(colour = "black", size = 1))
+##########################################################################################
+# test if data is normally distributed
+Test_Y <- Immune_Metab_Tidy %>% 
+    group_by(CD4_Resp_Per_Patient, IM_Markers)  %>% 
+    do(tidy(shapiro.test(.$Expression))) %>% 
+    ungroup() %>% 
+    select(-method)
+Test_Y
+Test_Y %<>% mutate(Normality = case_when(
+    p.value > 0.05 ~ "Normal",
+  p.value < 0.05 ~ "Not.Normal"
+))
+Test_Y # These are normally distributed data 
+Test_Y %>% filter(Normality == "Normal")
+dput(as.character(Test_Y %>% filter(Normality == "Not.Normal") %>%  pull(IM_Markers)))
+
+# use for Wilcoxon test 
+Imm_Wilcoxon_markers.Y <- c("p.AMPK", "PPARg", "CD1c", "CD86", "CD98", "PD.L1", "total.AMPK", 
+"CD141", "CD86", "HLA.DR", "PD.L1", "PPARg")
+###  Comparison between outcome groups
+
+# filter(!IM_Markers %in% c(Metabolic_markers)) %>% 
+AAA_t_test <- Immune_Metab_Tidy %>% filter(Response != "HD") %>% 
+  group_by(IM_Markers) %>%   filter(!IM_Markers %in% c(Imm_Wilcoxon_markeres)) %>% 
+  t_test(Expression ~ Outcome) %>% add_y_position()
+
+# MArkers for I used wilcox_test for the analysis
+BBB_wilcox_test <- Immune_Metab_Tidy %>% filter(Response != "HD") %>% 
+  filter(!is.na(CD4_Resp_Per_Patient)) %>% 
+  group_by(IM_Markers) %>%   filter(IM_Markers %in% c(Imm_Wilcoxon_markers.Y)) %>% 
+  wilcox_test(Expression ~ CD4_Resp_Per_Patient) %>% add_y_position()
+
+BBB_t_test <- Immune_Metab_Tidy %>% 
+  group_by(IM_Markers) %>%   filter(!IM_Markers %in% c(Imm_Wilcoxon_markers.Y)) %>% 
+  t_test(Expression ~ CD4_Resp_Per_Patient) %>% add_y_position()
+
+png("../Figures_09021_SC_mDC/BOX/BOX_Immune_CD4.Response.png",
+    height=3.5, width=23, units="in", res=600)
+Immune_Metab_Tidy %>%  filter(!is.na(CD4_Resp_Per_Patient)) %>% 
+  ggplot(aes(x = CD4_Resp_Per_Patient, y = Expression)) +
+        geom_boxplot(outlier.colour = NA, col = "grey50", alpha = 0.7) +
+  geom_jitter(position = jitter_0, shape=21,color="black",size = 2, alpha = 0.5,    aes(color=Response,fill=Response))+
+  #geom_vline(xintercept = c(2.5),col="black", lwd = 0.5, linetype="dashed", alpha=1)+
+  scale_color_manual(values = c(cols.Response.assign))+
+  scale_fill_manual(values = c(cols.Response.assign))+
+  stat_pvalue_manual(BBB_wilcox_test, label = "p", tip.length = 0,
+                     vjust = 0.01,
+                     size=3,
+                     hide.ns = FALSE)+
+    stat_pvalue_manual(BBB_t_test, label = "p", tip.length = 0,
+                     vjust = 0.01,
+                     size=3,
+                     hide.ns = FALSE)+
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.15)))+
+  theme_bw() +
+  facet_wrap(~IM_Markers, scales = "free_y", nrow = 1,
+             labeller = label_wrap_gen(width = 5, multi_line = TRUE)) +
+  ggtitle("CD4 Responses")+ Theme.Tcell
+
+dev.off()
+##########################################################################################
+
+##########################################################################################
+# test if data is normally distributed
+Test_Y <- Immune_Metab_Tidy %>% 
+    group_by(CD8_Resp_Per_Patient, IM_Markers)  %>% 
+    do(tidy(shapiro.test(.$Expression))) %>% 
+    ungroup() %>% 
+    select(-method)
+Test_Y
+Test_Y %<>% mutate(Normality = case_when(
+    p.value > 0.05 ~ "Normal",
+  p.value < 0.05 ~ "Not.Normal"
+))
+Test_Y # These are normally distributed data 
+Test_Y %>% filter(Normality == "Normal")
+dput(as.character(Test_Y %>% filter(Normality == "Not.Normal") %>%  pull(IM_Markers)))
+
+# use for Wilcoxon test 
+Imm_Wilcoxon_markers.Y <- c("PPARg", "CD206", "CD86", "CD141", "CD86", "HLA.DR", "PD.L1", 
+"PPARg")
+###  Comparison between outcome groups
+
+# MArkers for I used wilcox_test for the analysis
+BBB_wilcox_test <- Immune_Metab_Tidy %>% filter(Response != "HD") %>% 
+  filter(!is.na(CD8_Resp_Per_Patient)) %>% 
+  group_by(IM_Markers) %>%   filter(IM_Markers %in% c(Imm_Wilcoxon_markers.Y)) %>% 
+  wilcox_test(Expression ~ CD8_Resp_Per_Patient) %>% add_y_position()
+
+BBB_t_test <- Immune_Metab_Tidy %>% 
+  group_by(IM_Markers) %>%   filter(!IM_Markers %in% c(Imm_Wilcoxon_markers.Y)) %>% 
+  t_test(Expression ~ CD8_Resp_Per_Patient) %>% add_y_position()
+
+png("../Figures_09021_SC_mDC/BOX/BOX_Immune_CD8.Response.png",
+    height=3.5, width=23, units="in", res=600)
+Immune_Metab_Tidy %>%  filter(!is.na(CD8_Resp_Per_Patient)) %>% 
+  ggplot(aes(x = CD8_Resp_Per_Patient, y = Expression)) +
+        geom_boxplot(outlier.colour = NA, col = "grey50", alpha = 0.7) +
+  geom_jitter(position = jitter_0, shape=21,color="black",size = 2, alpha = 0.5,    aes(color=Response,fill=Response))+
+  #geom_vline(xintercept = c(2.5),col="black", lwd = 0.5, linetype="dashed", alpha=1)+
+  scale_color_manual(values = c(cols.Response.assign))+
+  scale_fill_manual(values = c(cols.Response.assign))+
+  stat_pvalue_manual(BBB_wilcox_test, label = "p", tip.length = 0,
+                     vjust = 0.01,
+                     size=3,
+                     hide.ns = FALSE)+
+    stat_pvalue_manual(BBB_t_test, label = "p", tip.length = 0,
+                     vjust = 0.01,
+                     size=3,
+                     hide.ns = FALSE)+
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.15)))+
+  theme_bw() +
+  facet_wrap(~IM_Markers, scales = "free_y", nrow = 1,
+             labeller = label_wrap_gen(width = 5, multi_line = TRUE)) +
+  ggtitle("CD8 Responses")+ Theme.Tcell
+
+dev.off()
+##########################################################################################
+
+##########################################################################################
+# test if data is normally distributed
+Test_Y <- Immune_Metab_Tidy %>% 
+    group_by(CD8.CD4_Resp_Per_Patient, IM_Markers)  %>% 
+    do(tidy(shapiro.test(.$Expression))) %>% 
+    ungroup() %>% 
+    select(-method)
+Test_Y
+Test_Y %<>% mutate(Normality = case_when(
+    p.value > 0.05 ~ "Normal",
+  p.value < 0.05 ~ "Not.Normal"
+))
+Test_Y # These are normally distributed data 
+Test_Y %>% filter(Normality == "Normal")
+dput(as.character(Test_Y %>% filter(Normality == "Not.Normal") %>%  pull(IM_Markers)))
+
+# use for Wilcoxon test 
+Imm_Wilcoxon_markers.Y <- c("CD1c", "CD86", "PD.L1", "CD141", "CD86", "HLA.DR", "PD.L1", 
+"PPARg")
+###  Comparison between outcome groups
+
+# MArkers for I used wilcox_test for the analysis
+BBB_wilcox_test <- Immune_Metab_Tidy %>% filter(Response != "HD") %>% 
+  filter(!is.na(CD8.CD4_Resp_Per_Patient)) %>% 
+  group_by(IM_Markers) %>%   filter(IM_Markers %in% c(Imm_Wilcoxon_markers.Y)) %>% 
+  wilcox_test(Expression ~ CD8.CD4_Resp_Per_Patient) %>% add_y_position()
+
+BBB_t_test <- Immune_Metab_Tidy %>% 
+  group_by(IM_Markers) %>%   filter(!IM_Markers %in% c(Imm_Wilcoxon_markers.Y)) %>% 
+  t_test(Expression ~ CD8.CD4_Resp_Per_Patient) %>% add_y_position()
+
+png("../Figures_09021_SC_mDC/BOX/BOX_Immune_CD8.CD4.Response.png",
+    height=3.5, width=21, units="in", res=600)
+Immune_Metab_Tidy %>%  filter(!is.na(CD8.CD4_Resp_Per_Patient)) %>% 
+  ggplot(aes(x = CD8.CD4_Resp_Per_Patient, y = Expression)) +
+        geom_boxplot(outlier.colour = NA, col = "grey50", alpha = 0.7) +
+  geom_jitter(position = jitter_0, shape=21,color="black",size = 2, alpha = 0.5,    aes(color=Response,fill=Response))+
+  #geom_vline(xintercept = c(2.5),col="black", lwd = 0.5, linetype="dashed", alpha=1)+
+  scale_color_manual(values = c(cols.Response.assign))+
+  scale_fill_manual(values = c(cols.Response.assign))+
+  stat_pvalue_manual(BBB_wilcox_test, label = "p", tip.length = 0,
+                     vjust = 0.01,
+                     size=3,
+                     hide.ns = FALSE)+
+    stat_pvalue_manual(BBB_t_test, label = "p", tip.length = 0,
+                     vjust = 0.01,
+                     size=3,
+                     hide.ns = FALSE)+
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.15)))+
+  theme_bw() +
+  facet_wrap(~IM_Markers, scales = "free_y", nrow = 1,
+             labeller = label_wrap_gen(width = 5, multi_line = TRUE)) +
+  ggtitle("CD8+CD4 Responses")+ Theme.Tcell
+
+dev.off()
+##########################################################################################
+```
+# ----------------------------
+# ----------------------------
+# ----------------------------
+
+### 1 MDS Metabolic Parameters Plots
+```{r}
+length(Immune_Metab_DF.Tcell)
+
+metabolic_subset_ABC <- Immune_Metab_DF.Tcell %>%  mutate_at(vars(Glucose_Dep:Glnlysis_Dep, total.mTOR,p.mTOR, p.AMPK, total.AMPK,HLA.DR:CD86,
+                                                                  `pAMPK:AMPK Ratio`:`pAMPK:pmTOR Ratio`), ~ normalize(.)) %>% 
+  mutate_at(vars(Glucose_Dep:Glnlysis_Dep, total.mTOR,p.mTOR, p.AMPK, total.AMPK,HLA.DR:CD86), ~ (.)+0.01)# filter out Puromycin
+
+metabolic_subset <- metabolic_subset_ABC %>% 
+  select(Patient_Info,c(Glucose_Dep:Glnlysis_Dep, total.mTOR,p.mTOR, p.AMPK, total.AMPK,CD98,CD36, `pAMPK:AMPK Ratio`:`pAMPK:pmTOR Ratio`), -Puromycin) 
+
+
+glimpse(metabolic_subset)
+expr_median_MET <- t(metabolic_subset[, -1])
+colnames(expr_median_MET) <- Immune_Metab_DF.Tcell$Patient_Info
+
+Met_mds1 <- plotMDS(expr_median_MET, plot = FALSE)
+
+ggdf_MDS_Met <- data.frame(MDS1 = Met_mds1$x, MDS2 = Met_mds1$y,
+                           Patient_Info = colnames(expr_median_MET))
+mm2 <- match(ggdf_MDS_Met$Patient_Info, Immune_Metab_DF.Tcell$Patient_Info)
+ggdf_MDS_Met$Patient_Number <- Immune_Metab_DF.Tcell$Sequence_Number[mm2]
+ggdf_MDS_Met$Response <- Immune_Metab_DF.Tcell$Response[mm2]
+ggdf_MDS_Met$Outcome <- Immune_Metab_DF.Tcell$Outcome[mm2]
+ggdf_MDS_Met$Outcome.1 <- Immune_Metab_DF.Tcell$Outcome.1[mm2]
+
+heatmap(expr_median_MET)
+################
+
+png("../Figures_09021_SC_mDC/MDS/MDS_Plot_Metab.png",
+     height=5, width=6, units="in", res=600)
+
+ggplot(ggdf_MDS_Met, aes(x = MDS1, y = MDS2, color = Response)) +
+  #geom_label_repel(aes(label = time), size =3.5) +
+  geom_point(size = 4, alpha = 0.7) +
+  ggtitle("MDS plot of Metabolic markers")+
+  theme_bw() +
+  scale_color_manual(values = cols.Response.assign) +
+  #scale_shape_manual(values = c(16,15,17)) +
+  theme(aspect.ratio = 1/1.5)+
+  theme(plot.title = element_text(size = 20, face = "bold"),
+        axis.text.x = element_text(face="plain", color="black",size=13),           # to label x-axis tics/number labels
+        axis.text.y = element_text(face="plain", color="black",size=13),                 # to label y-axis tics/number labels
+        axis.title.x= element_text(face="plain", color="black",size=17),                 # to label/remove x-axis labels
+        axis.title.y= element_text(face="plain", color="black",size=17))                 # to label/remove y-axis label  
+dev.off()
+################################################
+########################################################################################################
+################################################
+```
+
+### 2 MDS Immune Parameters Plots
+```{r}
+glimpse(Immune_subset)
+Immune_subset <- Immune_Metab_DF.Tcell %>% 
+  select(Patient_Info,c(HLA.DR:CD86, -total.mTOR, -Puromycin, -CD303,-PPARg))
+
+glimpse(Immune_subset)
+expr_median_IMM <- t(Immune_subset[, -1])
+colnames(expr_median_IMM) <- Immune_Metab_DF.Tcell$Patient_Info
+
+Imm_mds1 <- plotMDS(expr_median_IMM, plot = FALSE)
+
+ggdf_MDS_Imm <- data.frame(MDS1 = Imm_mds1$x, MDS2 = Imm_mds1$y,
+                           Patient_Info = colnames(expr_median_IMM))
+mm2 <- match(ggdf_MDS_Imm$Patient_Info, Immune_Metab_DF.Tcell$Patient_Info)
+ggdf_MDS_Imm$Patient_Number <- Immune_Metab_DF.Tcell$Sequence_Number[mm2]
+ggdf_MDS_Imm$Response <- Immune_Metab_DF.Tcell$Response[mm2]
+ggdf_MDS_Imm$Outcome <- Immune_Metab_DF.Tcell$Outcome[mm2]
+ggdf_MDS_Imm$Outcome.1 <- Immune_Metab_DF.Tcell$Outcome.1[mm2]
+
+################
+
+png("../Figures_09021_SC_mDC/MDS/MDS_Plot_Immune.png",
+     height=5, width=6, units="in", res=600)
+
+ggplot(ggdf_MDS_Imm, aes(x = MDS1, y = MDS2, color = Response)) +
+  #geom_label_repel(aes(label = time), size =3.5) +
+  geom_point(size = 4, alpha = 0.7) +
+  ggtitle("MDS plot of Immune markers")+
+  theme_bw() +
+  scale_color_manual(values = cols.Response.assign) +
+  #scale_shape_manual(values = c(16,15,17)) +
+  theme(aspect.ratio = 1/1.5)+
+  theme(plot.title = element_text(size = 20, face = "bold"),
+        axis.text.x = element_text(face="plain", color="black",size=13),           # to label x-axis tics/number labels
+        axis.text.y = element_text(face="plain", color="black",size=13),                 # to label y-axis tics/number labels
+        axis.title.x= element_text(face="plain", color="black",size=17),                 # to label/remove x-axis labels
+        axis.title.y= element_text(face="plain", color="black",size=17))                 # to label/remove y-axis label  
+dev.off()
+################################################
+########################################################################################################
+################################################
+```
+### 3 MDS All Parameters Plots
+```{r}
+glimpse(Immune_Metab_DF.Tcell)
+All_subset <- Immune_Metab_DF.Tcell %>% 
+  select(Patient_Info, c(HLA.DR:total.AMPK,`pAMPK:AMPK Ratio`:`pAMPK:pmTOR Ratio`, -Puromycin, -CD303,-PPARg))
+
+glimpse(All_subset)
+expr_median_IMM <- t(All_subset[, -1])
+colnames(expr_median_IMM) <- Immune_Metab_DF.Tcell$Patient_Info
+
+Imm_mds1 <- plotMDS(expr_median_IMM, plot = FALSE)
+
+ggdf_MDS_Imm <- data.frame(MDS1 = Imm_mds1$x, MDS2 = Imm_mds1$y,
+                           Patient_Info = colnames(expr_median_IMM))
+mm2 <- match(ggdf_MDS_Imm$Patient_Info, Immune_Metab_DF.Tcell$Patient_Info)
+ggdf_MDS_Imm$Patient_Number <- Immune_Metab_DF.Tcell$Sequence_Number[mm2]
+ggdf_MDS_Imm$Response <- Immune_Metab_DF.Tcell$Response[mm2]
+ggdf_MDS_Imm$Outcome <- Immune_Metab_DF.Tcell$Outcome[mm2]
+ggdf_MDS_Imm$Outcome.1 <- Immune_Metab_DF.Tcell$Outcome.1[mm2]
+
+################
+
+png("../Figures_09021_SC_mDC/MDS/MDS_Plot_All.png",
+     height=5, width=6, units="in", res=600)
+
+ggplot(ggdf_MDS_Imm, aes(x = MDS1, y = MDS2, color = Response)) +
+  #geom_label_repel(aes(label = time), size =3.5) +
+  geom_point(size = 4, alpha = 0.7) +
+  ggtitle("MDS plot of All markers")+
+  theme_bw() +
+  scale_color_manual(values = cols.Response.assign) +
+  #scale_shape_manual(values = c(16,15,17)) +
+  theme(aspect.ratio = 1/1.5)+
+  theme(plot.title = element_text(size = 20, face = "bold"),
+        axis.text.x = element_text(face="plain", color="black",size=13),           # to label x-axis tics/number labels
+        axis.text.y = element_text(face="plain", color="black",size=13),                 # to label y-axis tics/number labels
+        axis.title.x= element_text(face="plain", color="black",size=17),                 # to label/remove x-axis labels
+        axis.title.y= element_text(face="plain", color="black",size=17))                 # to label/remove y-axis label  
+dev.off()
+################################################
+########################################################################################################
+################################################
+```
+
+# ----------------------------
+#HEATMAP ----------
+```{r}
+# here I can choose which markers will be used for clustering 
+#####################
+Immune_Metab_DF.Tcell.Fit <- Immune_Metab_DF.Tcell %>% filter(Patient_Info != "Pt_28")
+Immune_Metab_HEAT <- Immune_Metab_DF.Tcell.Fit %>% 
+  mutate_at(vars(HLA.DR:total.AMPK,Glucose_Dep:Glnlysis_Dep, all_of(Metabolic_markers)), ~ normalize(.)+0.01)
+#Immune_Metab_HEAT %<>% mutate_at(vars(HLA.DR:total.AMPK,Glucose_Dep:Glnlysis_Dep, all_of(Metabolic_markers)), ~ log10(.))
+
+
+Immune_HEAT_Table <- Immune_Metab_HEAT %>% select(HLA.DR:total.AMPK, -Puromycin,- PPARg) %>% as.matrix()
+Metab_HEAT_Table <- Immune_Metab_HEAT %>% select(Glucose_Dep:Glnlysis_Dep, all_of(Metabolic_markers), - PPARg) %>% as.matrix()
+
+rownames(Immune_HEAT_Table) <- Immune_Metab_DF.Tcell.Fit$Patient_Info
+rownames(Metab_HEAT_Table) <- Immune_Metab_DF.Tcell.Fit$Patient_Info
+```
+
+```{r}
+# DEFINING LABELING and COLORS FOR HEAT MAP
+
+########
+# Here I combine all vectors into 1 
+
+Response = HeatmapAnnotation(Response = Immune_Metab_DF.Tcell.Fit$Response,
+                          col = list(Response = c("HD" = "magenta", 
+                                                   "PR" = "red", 
+                                                   "SD" = "green",
+                                                     "NED1" = "lightblue", 
+                                                   "NED2" = "blue",
+                                                   "PD" = "grey45")),
+                          gp = gpar(col = "black"),
+                          simple_anno_size = unit(0.5, "cm"),
+                          annotation_name_gp= gpar(fontsize = 12))
+
+
+############################################################---------------------------------------------------------#
+CD8 = HeatmapAnnotation(`CD8 Response` = Immune_Metab_DF.Tcell.Fit$CD8_Resp_Per_Patient,
+                          col = list(`CD8 Response` = c("Yes" = "red", 
+                                                 "No" = "grey50"
+                                                 )),
+                          gp = gpar(col = "black"),
+                          simple_anno_size = unit(0.3, "cm"),
+                          annotation_name_gp= gpar(fontsize = 12))
+
+CD4 = HeatmapAnnotation(`CD4 Response` = Immune_Metab_DF.Tcell.Fit$CD4_Resp_Per_Patient,
+                          col = list(`CD4 Response` = c("Yes" = "red", 
+                                                 "No" = "grey50"
+                                                 )),
+                          gp = gpar(col = "black"),
+                          simple_anno_size = unit(0.3, "cm"),
+                          annotation_name_gp= gpar(fontsize = 12))
+
+CD8.CD4 = HeatmapAnnotation(`CD8+CD4 Response` = Immune_Metab_DF.Tcell.Fit$CD8.CD4_Resp_Per_Patient,
+                          col = list(`CD8+CD4 Response` = c("Yes" = "red", 
+                                                 "No" = "grey50"
+                                                 )),
+                          gp = gpar(col = "black"),
+                          simple_anno_size = unit(0.3, "cm"),
+                          annotation_name_gp= gpar(fontsize = 12))
+############################################################---------------------------------------------------------#
+
+# Combination of 
+COMBO <- c(CD8,CD4,CD8.CD4,gap = unit(c(0.8,0.8,08), "mm"))
+############################################################---------------------------------------------------------#
+# Here I am transposing an exeisting table to extract the markers
+# and use them to group catagories for labeling
+################################################
+################################################
+# If I want to add metabolic parameters
+Mito_Dep <- c(Immune_Metab_DF.Tcell.Fit$Mito_Dep)
+Gluc_Dep <- c(Immune_Metab_DF.Tcell.Fit$Glucose_Dep)
+Glycolytic_Capacity <- c(Immune_Metab_DF.Tcell.Fit$Glyco_Cap)
+FAAO <- c(Immune_Metab_DF.Tcell.Fit$FAAO)
+FAO_Dep <- c(Immune_Metab_DF.Tcell.Fit$FAO_Dep)
+Glnlysis_Dep <- c(Immune_Metab_DF.Tcell.Fit$Glnlysis_Dep)
+summary(FAO_Dep)
+
+Together = HeatmapAnnotation(
+  'Glucose Dependence' = anno_barplot((Gluc_Dep),ylim = c(0, 110),
+                                      bar_width = 0.9,
+                                      height = unit(1.45, "cm"),axis = TRUE,
+                                      gp=gpar(border =NA,fill="black",lty="blank")),
+  'Mitochondrial Dependence' = anno_barplot((Mito_Dep),ylim = c(0, 120),
+                                            bar_width = 0.9,
+                                            height = unit(1.45, "cm"),axis = TRUE,
+                                            gp=gpar(border =NA,fill="blue",lty="blank")),
+  'Glycolytic Capacity' = anno_barplot((Glycolytic_Capacity),ylim = c(0, 70),
+                                       bar_width = 0.9,
+                                       height = unit(1.45, "cm"),axis = TRUE,
+                                       gp=gpar(border =NA,fill="red",lty="blank")),
+  'FAAO' = anno_barplot((FAAO),ylim = c(0, 140),
+                        bar_width = 0.9,
+                        height = unit(1.45, "cm"),axis = TRUE,
+                        gp=gpar(border =NA,fill="purple",lty="blank")),
+  'FAO Dependence' = anno_barplot((FAO_Dep),ylim = c(-20, 40),
+                        bar_width = 0.9,
+                        height = unit(1.45, "cm"),axis = TRUE,
+                        gp=gpar(border =NA,fill="dodgerblue",lty="blank")),
+  'Glnlysis Dependence' = anno_barplot((Glnlysis_Dep),ylim = c(-20, 50),
+                        bar_width = 0.9,
+                        height = unit(1.45, "cm"),axis = TRUE,
+                        gp=gpar(border =NA,fill="magenta",lty="blank")),
+  gap = unit(c(1.2,1.2,1.2,1.2,1.2), "mm"), annotation_name_gp= gpar(fontsize = 14))
+
+
+Metabolic_Param_Combo <- c(Together,  gap = unit(c(0.5), "mm"))
+
+
+################################ ################################ ################################
+# I am transposing the heatmap to have column = samples and rows = Markers
+New_Heat <- t(Immune_HEAT_Table)
+dend = hclust(dist(New_Heat))
+dend = color_branches(dend, k = 6)
+
+###############################################
+# To define Navy - Red colors Scheme
+# col_fun = colorRamp2(c(0.0,0.1, 0.5, 0.75,0.85), c("black","navy", "white", "red","brown"))
+# col_fun(seq(-3, 3))
+# Heatmap(heat2, name = "Markers", col = col_fun,
+#         column_title = "heatmap")
+# 
+
+png("../Figures_09021_SC_mDC/Heatmap_1.png",
+    height=9, width=10, units="in", res=600)
+Heatmap(New_Heat, name = "Marker Expression", clustering_distance_rows = function(x, y) 1 - cor(x, y),
+        row_names_gp = gpar(fontsize = 12),
+        show_column_names = FALSE,
+          height = unit(80, "mm"),
+        width = unit(100, "mm"),
+        column_split = 3,
+        row_split = 5,
+        border = TRUE,
+        heatmap_legend_param = list(direction = "horizontal"),
+        #column_split  = 2,
+        viridis(10, begin = 0, end = 1, option = "inferno"),
+        #col = rev(brewer.pal(n = 11, name = "Spectral")),
+        #col = wes_palette("Moonrise1"),
+        #col = rev(rainbow(7)),
+        #col = col_fun,
+        rect_gp = gpar(col = "white", lwd = 1),
+        column_title = "SCENITH Marker Clustering (pairwise distance)",
+        cluster_rows = T,
+        top_annotation = c(Response,Metabolic_Param_Combo),
+        bottom_annotation = COMBO,
+        row_title = "SCENITH Markers",
+        #row_title_gp = gpar(fontfamily = "sans", fontsize = 12),
+        # left_annotation = CATEGORIES,
+        column_title_gp = gpar(fontfamily = "sans", fontsize = 12))
+dev.off()
+```
+
+
+#======================
+# Read in scUMAP
+```{r}
+ss.OLIGO.umap <- read_csv("./09-021_SCENITH_mDC/ss.OLIGO.umap.csv")
+ss.OLIGO.umap %<>% 
+  dplyr::mutate(Oligo_quantile = ntile(ss.OLIGO.umap$Puromycin,4)) %>% 
+  mutate(Oligo_quantile = factor(Oligo_quantile,levels = c(4, 3, 2, 1)))
+
+ss.OLIGO.umap %<>%  
+  mutate(`pAMPK:AMPK Ratio` = p.AMPK/total.AMPK,
+  `pmTOR:mTOR Ratio` = p.mTOR/total.mTOR,
+  `pAMPK:pmTOR Ratio` = p.AMPK/p.mTOR,
+  `pAMPK:pmTOR Utimate` = `pAMPK:AMPK Ratio`/`pmTOR:mTOR Ratio`
+)
+```
+
+```{r}
+ss.OLIGO.umap$sample_id
+
+ss.OLIGO.umap %>% group_by(sample_id) %>% 
+  nest() %>% map(~mutate(Oligo_quantile_1 = ntile(ss.OLIGO.umap$Puromycin,4)))
+
+
+ dplyr::mutate(Oligo_quantile = ntile(ss.OLIGO.umap_c$Puromycin,4)) %>% ungroup()
+
+gapminder %>% split(gapminder$continent) %>%
+  map(~sample_n(., 5))
+
+
+ss.OLIGO.umap_c <- ss.OLIGO.umap %>%
+        as_tibble() %>%
+        group_by(sample_id) %>%
+        nest() %>% 
+        mutate(data = map(data, ~ 
+         .x %>% 
+           mutate(quintile = ntile(Puromycin, 4)))) %>% unnest(data)
+ss.OLIGO.umap_c %<>% 
+  mutate(quintile = factor(Oligo_quantile,levels = c(4, 3, 2, 1)))
+
+```
+
+
+# Set levels Immune
+```{r}
+ss.OLIGO.umap$Response <- factor(ss.OLIGO.umap$Response, levels=c("HD","PR","SD","NED1","NED2","PD"))
+ss.OLIGO.umap$Outcome <- factor(ss.OLIGO.umap$Outcome, levels=c("HD","Good","Bad"))
+ss.OLIGO.umap$Outcome.1 <- factor(ss.OLIGO.umap$Outcome.1, levels=c("HD","Good","Stable","Bad"))
+ss.OLIGO.umap$CD8_Resp_Per_Patient <- factor(ss.OLIGO.umap$CD8_Resp_Per_Patient, levels=c("No","Yes"))
+ss.OLIGO.umap$CD4_Resp_Per_Patient <- factor(ss.OLIGO.umap$CD4_Resp_Per_Patient, levels=c("No","Yes"))
+ss.OLIGO.umap$CD8.CD4_Resp_Per_Patient <- factor(ss.OLIGO.umap$CD8.CD4_Resp_Per_Patient, levels=c("No","Yes"))
+```
+
+# Oligo BAR Plot
+```{r}
+png("./Figures_09021_SC_mDC/Oligo/Oligo_BAR_Pop_counts_fill.png", 
+    height=3.5, width=3.5, units="in", res=600)
+
+ss.OLIGO.umap %>% group_by(Oligo_quantile, Outcome) %>%  #filter(Oligo_quantile %in% c("1", "4")) %>% 
+  dplyr::summarise(n = n()) %>%
+  ggplot(aes(x = Outcome, y = n, fill = Oligo_quantile)) +
+  geom_bar(stat = "identity",position = "fill", width = .75, alpha = 0.7) +
+  scale_fill_manual(values = c("red","tomato","dodgerblue","navy"))+
+  theme_bw()+
+  guides(color = guide_legend(override.aes = list(size = 5), ncol = 1))+
+    # facet_wrap(~Outcome.1, scales = "free",
+    #             labeller = label_wrap_gen(width = 5, multi_line = TRUE)) + 
+  ggtitle("Cell numbers per Oligo Quantile") + xlab("") + ylab("cells (n)")+
+  theme(legend.position = "right", aspect.ratio = 1/1,
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA, size=0.5),
+        strip.text = element_text(size = 12, face ="bold"),              # to label add individual box
+        axis.text.x = element_text(face="plain", color="black",size=14, angle = 90,vjust = 0.1), 
+        # to label x-axis tics/number labels
+        axis.text.y = element_text(face="plain", color="black",size=14),  # to label y-axis tics/number labels
+        axis.title.x=element_blank(),                                    # to label/remove x-axis labels
+        axis.title.y=element_blank(),                                    # to label/remove y-axis labels
+        axis.ticks =  element_line(colour = "black", size = 1))
+dev.off()
+```
+
+
+
+# UMAP OLIGO median plots
+```{r}
+`pAMPK:AMPK Ratio`:`pAMPK:pmTOR Utimate`
+ss.OLIGO.umap %>% glimpse()
+ss.OLIGO.umap.median <- ss.OLIGO.umap %>% select(Patient_Info,Oligo_quantile,UMAP1:Glnlysis_Dep,`pAMPK:AMPK Ratio`:`pAMPK:pmTOR Utimate`) %>% 
+ group_by(Patient_Info,Oligo_quantile) %>% 
+  dplyr::summarise(across(where(is.numeric), ~ median(.x, na.rm = TRUE))) 
+
+glimpse(Puro_CLinical)
+OLIGO.umap.Clin <- ss.OLIGO.umap.median %>% left_join(Puro_CLinical %>%  select(Patient_Info,Patient_CPL_Code:Outcome,  Bulk_Response_Per_Patient:CD8_CD4_COMBO), by = "Patient_Info") 
+OLIGO.umap.Clin.Tidy <- OLIGO.umap.Clin %>%  gather(IM_Markers, Expression, HLA.DR: total.AMPK,`pAMPK:AMPK Ratio`:`pAMPK:pmTOR Utimate`)
+```
+
+# Set levels Immune
+```{r}
+OLIGO.umap.Clin.Tidy$Response <- factor(OLIGO.umap.Clin.Tidy$Response, levels=c("HD","PR","SD","NED1","NED2","PD"))
+OLIGO.umap.Clin.Tidy$Outcome <- factor(OLIGO.umap.Clin.Tidy$Outcome, levels=c("HD","Good","Bad"))
+OLIGO.umap.Clin.Tidy$Outcome.1 <- factor(OLIGO.umap.Clin.Tidy$Outcome.1, levels=c("HD","Good","Stable","Bad"))
+OLIGO.umap.Clin.Tidy$CD8_Resp_Per_Patient <- factor(OLIGO.umap.Clin.Tidy$CD8_Resp_Per_Patient, levels=c("No","Yes"))
+OLIGO.umap.Clin.Tidy$CD4_Resp_Per_Patient <- factor(OLIGO.umap.Clin.Tidy$CD4_Resp_Per_Patient, levels=c("No","Yes"))
+OLIGO.umap.Clin.Tidy$CD8.CD4_Resp_Per_Patient <- factor(OLIGO.umap.Clin.Tidy$CD8.CD4_Resp_Per_Patient, levels=c("No","Yes"))
+```
+
+
+```{r}
+############################################################
+############################################################
+OLIGO.umap.Clin.Tidy$Oligo_quantile <- factor(OLIGO.umap.Clin.Tidy$Oligo_quantile, levels=c(
+  "1",
+  "2",
+  "3",
+  "4"))
+
+stat.test <- OLIGO.umap.Clin.Tidy %>%  filter(IM_Markers %in% c("ICOSLG")) %>% 
+  group_by(IM_Markers) %>%
+  t_test(Expression ~ Oligo_quantile, ref.group = "1",p.adjust.method = "bonferroni") %>% add_y_position()
+
+png("../Figures_09021_SC_mDC/Oligo/Oligo.png",
+    height=16, width=16, units="in", res=600)
+OLIGO.umap.Clin.Tidy %>%  #filter(IM_Markers %in% c("ICOSLG")) %>% 
+  filter(!IM_Markers %in% c("PPARg", "Puromycin")) %>%   
+  ggplot(aes(x = Oligo_quantile, y = Expression)) +
+        geom_boxplot(aes(group=Oligo_quantile),outlier.colour = NA, col = "grey50", alpha = 0.7) +
+
+  geom_jitter(position = jitter_0, shape=21,color="black",size = 2, alpha = 0.5,    aes(color=Response,fill=Response)) +
+  #geom_vline(xintercept = c(2.5),col="black", lwd = 0.5, linetype="dashed", alpha=1)+
+  scale_color_manual(values = c(cols.Response.assign))+
+  scale_fill_manual(values = c(cols.Response.assign))+
+stat_compare_means(
+    mapping=aes(label = format.pval(..p.adj.., digits = 1)),
+    method = "t.test", 
+    ref.group = "1",
+    size = 3.5
+    )+
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  theme_bw() +
+  facet_wrap(~IM_Markers, scales = "free", nrow = 3,
+             labeller = label_wrap_gen(width = 5, multi_line = TRUE)) +
+  theme(
+  legend.position = "right", aspect.ratio = 1/1,
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  strip.text = element_text(size = 12, face ="bold"),              # to label add individual box
+  strip.background =element_blank(), 
+  panel.border = element_rect(colour = "black", fill=NA, size=0.5),
+  # to color individual box
+  axis.text.x = element_text(face="plain", color="black",size=10),
+  # to label x-axis tics/number labels
+  axis.text.y = element_text(face="plain", color="black",size=10),  # to label y-axis tics/number labels
+  axis.title.x= element_blank(),                                    # to label/remove x-axis labels
+  axis.title.y= element_text(face="plain", color="black",size=10),    # to label/remove y-axis labels
+  axis.ticks = element_line(colour = "black", size = 1))
+dev.off()
+
+
+############################################################
+
+OLIGO.umap.Clin.Tidy$Response <- factor(OLIGO.umap.Clin.Tidy$Response, levels=c("HD","PR","SD","NED1","NED2","PD"))
+OLIGO.umap.Clin.Tidy$Outcome <- factor(OLIGO.umap.Clin.Tidy$Outcome, levels=c("HD","Good","Bad"))
+OLIGO.umap.Clin.Tidy$Outcome.1 <- factor(OLIGO.umap.Clin.Tidy$Outcome.1, levels=c("HD","Good","Stable","Bad"))
+
+png("../Figures_09021_SC_mDC/Oligo/Oligo_Markers_Lines_Indi.png",
+    height=10, width=12, units="in", res=600)
+OLIGO.umap.Clin.Tidy %>% filter(!IM_Markers %in% c("PPARg")) %>% 
+  #filter(Oligo_quantile %in% c("1","4")) %>% 
+  ggplot(aes(x = Oligo_quantile, y = Expression)) +
+  stat_summary(fun = median, geom = "line",aes(group = Patient_Info, color = Outcome.1))+
+    stat_summary(geom = "errorbar",aes(group = Patient_Info, color = Outcome.1), width = 0.25)+
+  scale_color_manual(values = c(cols.Outcome.1.assign))+
+  scale_fill_manual(values = c(cols.Outcome.1.assign))+
+ stat_compare_means(
+    mapping=aes(label = format.pval(..p.adj.., digits = 1)),
+    method = "t.test",
+    ref.group = "4",
+    size = 2.5
+    )+
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.15)))+
+  theme_bw() +
+  facet_wrap(~IM_Markers, scales = "free_y", nrow = 4,
+             labeller = label_wrap_gen(width = 5, multi_line = TRUE)) +
+  theme(
+  legend.position = "right", aspect.ratio = 1/1,
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  strip.text = element_text(size = 10, face ="bold"),              # to label add individual box
+  strip.background =element_blank(), 
+  panel.border = element_rect(colour = "black", fill=NA, size=0.5),
+  # to color individual box
+  axis.text.x = element_text(face="plain", color="black",size=10),
+  # to label x-axis tics/number labels
+  axis.text.y = element_text(face="plain", color="black",size=10),  # to label y-axis tics/number labels
+  axis.title.x= element_blank(),                                    # to label/remove x-axis labels
+  axis.title.y= element_text(face="plain", color="black",size=10),    # to label/remove y-axis labels
+  axis.ticks = element_line(colour = "black", size = 1))
+dev.off()
+
+my_comparisons <- list(c("HD", "Good"),c("HD", "Bad"),c("Good", "Bad"))
+
+   # QUANTILE 4
+OLIGO.umap.Clin.Tidy
+png("./Figures_09021_SC_mDC/Oligo/Glycolytic_Cluster_Comps.png",
+    height=12, width=12, units="in", res=600)
+OLIGO.umap.Clin.Tidy %>%  filter(Oligo_quantile %in% c("4")) %>% 
+  filter(!IM_Markers %in% c("PPARg", "Puromycin")) %>% 
+  ggplot(aes(x = Outcome, y = Expression)) +
+        geom_boxplot(aes(group=Outcome),outlier.colour = NA, col = "grey50", alpha = 0.7) +
+  geom_jitter(position = jitter_0, shape=21,color="black",size = 2, alpha = 0.5,    aes(color=Outcome.1,fill=Outcome.1)) +
+  #geom_vline(xintercept = c(2.5),col="black", lwd = 0.5, linetype="dashed", alpha=1)+
+  scale_color_manual(values = c(cols.Outcome.1.assign))+
+  scale_fill_manual(values = c(cols.Outcome.1.assign))+
+  stat_compare_means(comparisons=my_comparisons, method = "t.test", aes(label=..p.adj..), size = 3.5,
+                     tip.length = 0)+
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  theme_bw() +
+  facet_wrap(~IM_Markers, scales = "free_y", nrow = 3,
+             labeller = label_wrap_gen(width = 5, multi_line = TRUE)) +
+  theme(
+  legend.position = "right", aspect.ratio = 1/0.7,
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  strip.text = element_text(size = 12, face ="bold"),              # to label add individual box
+  strip.background =element_blank(), 
+  panel.border = element_rect(colour = "black", fill=NA, size=0.5),
+  # to color individual box
+  axis.text.x = element_text(face="plain", color="black",size=10),
+  # to label x-axis tics/number labels
+  axis.text.y = element_text(face="plain", color="black",size=10),  # to label y-axis tics/number labels
+  axis.title.x= element_blank(),                                    # to label/remove x-axis labels
+  axis.title.y= element_text(face="plain", color="black",size=10),    # to label/remove y-axis labels
+  axis.ticks = element_line(colour = "black", size = 1))
+dev.off()
+
+  # QUANTILE 1
+png("./Figures_09021_SC_mDC/Oligo/Mitochondrial_Cluster_Comps.png",
+    height=12, width=12, units="in", res=600)
+OLIGO.umap.Clin.Tidy %>%  filter(Oligo_quantile %in% c("1")) %>% 
+  filter(!IM_Markers %in% c("PPARg", "Puromycin")) %>% 
+  ggplot(aes(x = Outcome, y = Expression)) +
+        geom_boxplot(aes(group=Outcome),outlier.colour = NA, col = "grey50", alpha = 0.7) +
+  geom_jitter(position = jitter_0, shape=21,color="black",size = 2, alpha = 0.5,    aes(color=Outcome.1,fill=Outcome.1)) +
+  #geom_vline(xintercept = c(2.5),col="black", lwd = 0.5, linetype="dashed", alpha=1)+
+  scale_color_manual(values = c(cols.Outcome.1.assign))+
+  scale_fill_manual(values = c(cols.Outcome.1.assign))+
+  stat_compare_means(comparisons=my_comparisons, method = "t.test", aes(label=..p.adj..), size = 3.5,
+                     tip.length = 0)+
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  theme_bw() +
+  facet_wrap(~IM_Markers, scales = "free_y", nrow = 3,
+             labeller = label_wrap_gen(width = 5, multi_line = TRUE)) +
+  theme(
+  legend.position = "right", aspect.ratio = 1/0.7,
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  strip.text = element_text(size = 12, face ="bold"),              # to label add individual box
+  strip.background =element_blank(), 
+  panel.border = element_rect(colour = "black", fill=NA, size=0.5),
+  # to color individual box
+  axis.text.x = element_text(face="plain", color="black",size=10),
+  # to label x-axis tics/number labels
+  axis.text.y = element_text(face="plain", color="black",size=10),  # to label y-axis tics/number labels
+  axis.title.x= element_blank(),                                    # to label/remove x-axis labels
+  axis.title.y= element_text(face="plain", color="black",size=10),    # to label/remove y-axis labels
+  axis.ticks = element_line(colour = "black", size = 1))
+dev.off()
+```
+#======================
+
+
+
+
+# ----------------------------
+# ----------------------------
+
+# UMAP median markers
+```{r}
+metabolic_subset <- metabolic_subset_ABC %>% 
+  select(Patient_Info,c(total.mTOR,p.mTOR, p.AMPK, total.AMPK,HLA.DR:CD86), -Puromycin) 
+
+mat <- metabolic_subset_ABC %>% select(colnames(metabolic_subset), -Patient_Info) %>% as.matrix()
+rownames(mat) <- metabolic_subset$Patient_Info
+
+set.seed(142)
+All.Param.umap <- umap(mat)
+
+All.Param.umap$layout
+
+umap_df <- All.Param.umap$layout %>%
+  as.data.frame()%>%
+  rename(UMAP1="V1",
+         UMAP2="V2") %>% rownames_to_column(var = "Patient_Info") %>% 
+  inner_join(metabolic_subset_ABC %>% select(Patient_Info,Patient_CPL_Code:Outcome, CD8.CD4_Resp_Per_Patient, CD8_Resp_Per_Patient,CD4_Resp_Per_Patient  ), by="Patient_Info")
+umap_df %>% head()
+
+umap_df %>%
+  ggplot(aes(x = UMAP1, 
+             y = UMAP2))+
+   geom_point(aes(col = CD4_Resp_Per_Patient))+
+    scale_color_manual(values = c(cols.T_cell.assign)) + theme_bw()
+  #facet_wrap(~DC, nrow = 1)+
+  labs(x = "UMAP1",
+       y = "UMAP2",
+      subtitle = "UMAP plot")
+   # geom_circle(aes(x0 = 0, y0 = -0, r = 0.65), 
+   #            color = "green",
+   #            inherit.aes = FALSE)
+#ggsave("UMAP_plot_example1.png")
+
+umap_df %>%
+  ggplot(aes(x = UMAP1, 
+             y = UMAP2))+
+   geom_point(aes(col = Outcome.1))+
+    scale_color_manual(values = c(cols.Outcome.1.assign)) + theme_bw()
+  #facet_wrap(~DC, nrow = 1)+
+  labs(x = "UMAP1",
+       y = "UMAP2",
+      subtitle = "UMAP plot")
+```
+
+# UMAP single cell Table Processing
+# --------------
+UMAP single cell
+```{r}
+head(LOG_Aurora)
+LOG_Aurora %>% filter(Inhibitor == "O") %>% group_by(filename) %>%  tally() %>%  arrange((n))
+
+Subset_UMAP_O <- LOG_Aurora %>% filter(Inhibitor == "O") %>% 
+  group_by(filename) %>% 
+  slice_sample(n = 5000,replace = F) %>%
+  ungroup()
+dim(Subset_UMAP_O)
+```
+
+```{r}
+ss_UMAP_All_O <- Subset_UMAP_O %>% ungroup() %>% mutate(ID=row_number()) %>%
+  mutate_if(is.numeric, ~replace(., is.na(.), 0.001)) %>% 
+  mutate(filename_Unique = paste(ID,filename, sep = "-")) 
+  
+ss_UMAP_All_O_mat <- ss_UMAP_All_O %>% 
+  select(HLA.DR:total.AMPK, -Puromycin) %>% as.matrix()
+
+glimpse(ss_UMAP_All_O)
+
+rownames(ss_UMAP_All_O_mat) <- ss_UMAP_All_O$filename_Unique
+set.seed(142)
+ss_OLIGO.umap <- umap(ss_UMAP_All_O_mat)
+ss_OLIGO.umap$layout
+
+ss.OLIGO.umap_df <- ss_OLIGO.umap$layout %>% 
+  as.data.frame() %>%
+  rename(UMAP1="V1",
+         UMAP2="V2") %>% 
+  rownames_to_column(var = "filename_Unique") %>% inner_join(ss_UMAP_All_O %>% as.data.frame() %>% select(-filename,-ID),
+                                                                by="filename_Unique")
+
+ss.OLIGO.umap <- ss.OLIGO.umap_df %>%  left_join(
+  Immune_Metab_DF.Tcell %>% select(Response:Outcome,Patient_Info,Glucose_Dep:Glnlysis_Dep, Bulk_Response_Per_Patient:CD8_CD4_COMBO), by = "Patient_Info")
+
+ss.OLIGO.umap %<>% 
+  dplyr::mutate(Oligo_quantile = ntile(ss.OLIGO.umap$Puromycin,4)) %>% 
+  mutate(Oligo_quantile = factor(Oligo_quantile,levels = c(4, 3, 2, 1)))
+
+#ss.OLIGO.umap %>%  write_csv("ss.OLIGO.umap.csv")
+```
+
+#-------------------------------
+#-------------------------------
+# New Umaps based on Immune Markers
+To run UMAP from single cell expression matrix
+```{r}
+Metabolic_markers <- c("total.AMPK","p.AMPK","total.mTOR","p.mTOR", "pAMPK:AMPK Ratio","pmTOR:mTOR Ratio","pAMPK:pmTOR Ratio","Puromycin","PPARg")
+
+glimpse(ss.OLIGO.umap)
+
+ss_UMAP_All_O_mat <- ss.OLIGO.umap %>% 
+  select(Metabolic_markers,-PPARg,-`pAMPK:AMPK Ratio`,`pmTOR:mTOR Ratio`,
+         Glucose_Dep,Mito_Dep,FAO_Dep, Glnlysis_Dep) %>% as.matrix()
+
+ss_UMAP_All_O_mat <- ss.OLIGO.umap %>% 
+  select(HLA.DR:CD141,CD40,CD1c,CD303:CD86,-PPARg) %>% as.matrix()
+
+ss.OLIGO.umap %>% select(filename_Unique,HLA.DR:CD86,Patient_Info,Outcome,Bulk_Response_Per_Patient:CD8_CD4_COMBO)
+head(ss_UMAP_All_O_mat)
+
+rownames(ss_UMAP_All_O_mat) <- ss.OLIGO.umap$filename_Unique
+set.seed(142)
+ss_OLIGO.umap <- umap(ss_UMAP_All_O_mat)
+ss_OLIGO.umap$layout
+
+ss.OLIGO.umap_df <- ss_OLIGO.umap$layout %>% 
+  as.data.frame() %>%
+  rename(UMAP1="V1",
+         UMAP2="V2") %>% 
+  rownames_to_column(var = "filename_Unique") %>% 
+  inner_join(ss.OLIGO.umap %>% 
+               select(filename_Unique,HLA.DR:CD86,Patient_Info,Outcome.1,Bulk_Response_Per_Patient:CD8_CD4_COMBO) %>% 
+                                                              as.data.frame(),
+                                                                by="filename_Unique")
+#ss.OLIGO.umap %>%  write_csv("ss.OLIGO.umap.csv")
+```
+#-------------------------------
+
+
+```{r}
+UMAP_theme <-   theme(legend.position = "none", aspect.ratio = 1/1,
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill ="white"),
+        panel.border = element_rect(colour = "black", fill=NA, size=0.5),
+        strip.text = element_text(size = 12, face ="bold"),              # to label add individual box
+        strip.background =element_rect(fill="white"),                    # to color individual box
+        axis.text.x = element_blank(), 
+        # to label x-axis tics/number labels
+        axis.text.y = element_blank(), # to label y-axis tics/number labels
+        axis.title.x=element_blank(),                                    # to label/remove x-axis labels
+        axis.title.y=element_blank(),                                    # to label/remove y-axis labels
+        axis.ticks = element_blank())
+```
+
+```{r}
+png("../Figures_09021_SC_mDC/UMAPs/UMAP_2_Resp_Composite_Immune.png",
+    height=3.5, width=12, units="in", res=600)
+set.seed(1) 
+ss.OLIGO.umap_c %>%
+  #sample_n(size = 20000, replace = F) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, color = Oligo_quantile)) +
+  geom_point(size = 0.05, alpha = 0.75) +
+  xlim(-14,11)+ylim(-15,10)+
+  #facet_wrap(~ , ncol = 6)+
+  scale_color_manual(values = c("red", "lightcoral", "lightblue", "navy")) +
+  guides(color = guide_legend(override.aes = list(size = 4), ncol = 1))+
+  UMAP_theme + ggtitle("Oligomycin Quantile UMAP") + theme(legend.position = "right",
+                                                      legend.key = element_rect(colour = NA, fill = NA))
+  ss.OLIGO.umap_c %>% 
+  #sample_n(size = 20000, replace = F) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, color = Puromycin)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  xlim(-14,11)+ylim(-15,10)+
+  #facet_wrap(~ , ncol = 6)+
+  scale_color_viridis(option = "magma",limits = c(0, 1))+  # to change order use: direction = -1 & to state color limits = c(0, 0.5)
+  guides(color = guide_legend(override.aes = list(size = 4), ncol = 1))+
+  UMAP_theme + ggtitle("Puromycin Overlay")+  theme(legend.position = "right",
+                                                      legend.key = element_rect(colour = NA, fill = NA))
+
+dev.off()
+
+
+png("../Figures_09021_SC_mDC/UMAPs/UMAP_A.png",
+    height=4, width=4, units="in", res=600)
+set.seed(1) 
+ ss.OLIGO.umap_df %>% slice_sample(n = 35000,replace = F) %>%
+  #sample_n(size = 20000, replace = T) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, color = Outcome.1)) +
+  geom_point(size = 0.05, alpha = 0.75) +
+  xlim(-14,11)+ylim(-15,10)+ facet_wrap(~Outcome.1)+
+  #facet_wrap(~ , ncol = 6)+
+  scale_color_manual(values = c(cols.Outcome.1.assign)) +
+  guides(color = guide_legend(override.aes = list(size = 4), ncol = 1))+
+  UMAP_theme + ggtitle("HLA-DR Overlay") +theme(legend.position = "right",
+                                                 legend.key = element_rect(colour = NA, fill = NA))
+dev.off()
+
+
+ss.OLIGO.umap %>% slice_sample(n = 35000,replace = F) %>%
+  #sample_n(size = 20000, replace = T) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, color = Response)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  xlim(-14,11)+ylim(-15,10)+
+
+  #facet_wrap(~ , ncol = 6)+
+  guides(color = guide_legend(override.aes = list(size = 4), ncol = 1))+
+  UMAP_theme + ggtitle("Single Cell UMAP")
+
+
+png("../Figures_09021_SC_mDC/UMAPs/UMAP_A.png",
+    height=4, width=4, units="in", res=600)
+set.seed(1) 
+ ss.OLIGO.umap_df %>% slice_sample(n = 25000,replace = F) %>%
+  #sample_n(size = 20000, replace = T) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, color = HLA.DR)) +
+  geom_point(size = 0.05, alpha = 0.75) +
+  xlim(-14,11)+ylim(-15,10)+
+  #facet_wrap(~ , ncol = 6)+
+  scale_color_viridis(option = "magma",limits = c(0, 1))+  # to change order use: direction = -1 & to state color limits = c(0, 0.5)
+  guides(color = guide_legend(override.aes = list(size = 4), ncol = 1))+
+  UMAP_theme + ggtitle("HLA-DR Overlay") +theme(legend.position = "right",
+                                                 legend.key = element_rect(colour = NA, fill = NA))
+dev.off()
+   
+   
+# Immune Markers
+#####
+png("../Figures_09021_SC_mDC/UMAPs/UMAP_2_Resp_Immune.png",
+    height=10, width=12, units="in", res=600)
+set.seed(1) 
+ ss.OLIGO.umap_df %>% slice_sample(n = 25000,replace = F) %>%
+  #sample_n(size = 20000, replace = T) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, color = HLA.DR)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  xlim(-14,11)+ylim(-15,10)+
+  #facet_wrap(~ , ncol = 6)+
+  scale_color_viridis(option = "magma",limits = c(0, 1))+  # to change order use: direction = -1 & to state color limits = c(0, 0.5)
+  guides(color = guide_legend(override.aes = list(size = 4), ncol = 1))+
+  UMAP_theme + ggtitle("HLA-DR Overlay") +
+  ss.OLIGO.umap_df %>% slice_sample(n = 25000,replace = F) %>%
+  #sample_n(size = 20000, replace = T) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, color = CD86)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  xlim(-14,11)+ylim(-15,10)+
+  #facet_wrap(~ , ncol = 6)+
+  scale_color_viridis(option = "magma",limits = c(0, 1))+  # to change order use: direction = -1 & to state color limits = c(0, 0.5)
+  guides(color = guide_legend(override.aes = list(size = 4), ncol = 1))+
+  UMAP_theme + ggtitle("CD86 Overlay")+
+     ss.OLIGO.umap_df %>% slice_sample(n = 25000,replace = F) %>%
+  #sample_n(size = 20000, replace = T) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, color = PD.L1)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  xlim(-14,11)+ylim(-15,10)+
+  #facet_wrap(~ , ncol = 6)+
+  scale_color_viridis(option = "magma",limits = c(0, 1))+  # to change order use: direction = -1 & to state color limits = c(0, 0.5)
+  guides(color = guide_legend(override.aes = list(size = 4), ncol = 1))+
+  UMAP_theme + ggtitle("PD-L1 Overlay") +
+   
+  ss.OLIGO.umap_df %>% slice_sample(n = 25000,replace = F) %>%
+  #sample_n(size = 20000, replace = T) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, color = CD206)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  xlim(-14,11)+ylim(-15,10)+
+  #facet_wrap(~ , ncol = 6)+
+  scale_color_viridis(option = "magma",limits = c(0, 1))+  # to change order use: direction = -1 & to state color limits = c(0, 0.5)
+  guides(color = guide_legend(override.aes = list(size = 4), ncol = 1))+
+  UMAP_theme + ggtitle("CD206 Overlay")+
+   #ICOSLG
+   ss.OLIGO.umap_df %>% slice_sample(n = 25000,replace = F) %>%
+  #sample_n(size = 20000, replace = T) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, color = ICOSLG)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  xlim(-14,11)+ylim(-15,10)+
+  #facet_wrap(~ , ncol = 6)+
+  scale_color_viridis(option = "magma",limits = c(0, 1))+  # to change order use: direction = -1 & to state color limits = c(0, 0.5)
+  guides(color = guide_legend(override.aes = list(size = 4), ncol = 1))+
+  UMAP_theme + ggtitle("ICOSLG Overlay")+
+   
+  ss.OLIGO.umap_df %>% slice_sample(n = 25000,replace = F) %>%
+  #sample_n(size = 20000, replace = T) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, color = CD40)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  xlim(-14,11)+ylim(-15,10)+
+  #facet_wrap(~ , ncol = 6)+
+  scale_color_viridis(option = "magma",limits = c(0, 1))+  # to change order use: direction = -1 & to state color limits = c(0, 0.5)
+  guides(color = guide_legend(override.aes = list(size = 4), ncol = 1))+
+  UMAP_theme + ggtitle("CD40 Overlay") +
+   
+     ss.OLIGO.umap_df %>% slice_sample(n = 25000,replace = F) %>%
+  #sample_n(size = 20000, replace = T) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, color = CD1c)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  xlim(-14,11)+ylim(-15,10)+
+  #facet_wrap(~ , ncol = 6)+
+  scale_color_viridis(option = "magma",limits = c(0, 1))+  # to change order use: direction = -1 & to state color limits = c(0, 0.5)
+  guides(color = guide_legend(override.aes = list(size = 4), ncol = 1))+
+  UMAP_theme + ggtitle("CD1c Overlay") +
+   
+   ss.OLIGO.umap_df %>% slice_sample(n = 25000,replace = F) %>%
+  #sample_n(size = 20000, replace = T) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, color = CD141)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  xlim(-14,11)+ylim(-15,10)+
+  #facet_wrap(~ , ncol = 6)+
+  scale_color_viridis(option = "magma",limits = c(0, 1))+  # to change order use: direction = -1 & to state color limits = c(0, 0.5)
+  guides(color = guide_legend(override.aes = list(size = 4), ncol = 1))+
+  UMAP_theme + ggtitle("CD141 Overlay")+
+ 
+ ss.OLIGO.umap_df %>% slice_sample(n = 25000,replace = F) %>%
+  #sample_n(size = 20000, replace = T) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, color = ILT3)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  xlim(-14,11)+ylim(-15,10)+
+  #facet_wrap(~ , ncol = 6)+
+  scale_color_viridis(option = "magma",limits = c(0, 1))+  # to change order use: direction = -1 & to state color limits = c(0, 0.5)
+  guides(color = guide_legend(override.aes = list(size = 4), ncol = 1))+
+  UMAP_theme + ggtitle("ILT3 Overlay") +  theme(legend.position = "right")
+dev.off()
+#####
+#####
+```
+
+```{r}
+ss.OLIGO.umap.median <- ss.OLIGO.umap_df %>% select(Patient_Info,Oligo_quantile,UMAP1:CD86,Oligo_quantile) %>% 
+ group_by(Patient_Info,Oligo_quantile) %>% 
+  dplyr::summarise(across(where(is.numeric), ~ median(.x, na.rm = TRUE))) 
+
+glimpse(Puro_CLinical)
+OLIGO.umap.Clin <- ss.OLIGO.umap.median %>% left_join(Puro_CLinical %>%  select(Patient_Info,Patient_CPL_Code:Outcome,  Bulk_Response_Per_Patient:CD8_CD4_COMBO), by = "Patient_Info") 
+OLIGO.umap.Clin.Tidy <- OLIGO.umap.Clin %>%  gather(IM_Markers, Expression, HLA.DR: total.AMPK,`pAMPK:AMPK Ratio`:`pAMPK:pmTOR Utimate`)
+
+OLIGO.umap.Clin %>% 
+  ggplot(aes(x = UMAP1, y = UMAP2)) +
+  geom_jitter(position = jitter_0, shape=21,size = 2, alpha = 0.5, aes(color=Oligo_quantile,fill=Oligo_quantile)) +
+  #geom_vline(xintercept = c(2.5),col="black", lwd = 0.5, linetype="dashed", alpha=1)+
+  scale_color_manual(values = c("red", "lightcoral", "lightblue", "navy"))+
+  scale_fill_manual(values = c("red", "lightcoral", "lightblue", "navy"))
+
+OLIGO.umap.Clin$Oligo_quantile <- factor(OLIGO.umap.Clin$Oligo_quantile, 
+                                              levels=c("1","2","3","4"))
+
+
+png("./Figures_09021_SC_mDC/Oligo/Oligo_Median_UMAP.png",
+    height=3.5, width=9, units="in", res=600)
+OLIGO.umap.Clin %>% filter(Oligo_quantile %in% c("1","2","3","4")) %>% 
+  filter(Patient_Info != "Pt_28") %>% 
+  ggplot(aes(x = UMAP1, y = UMAP2)) +
+  geom_jitter(position = jitter_0, shape=21,color = "black", size = 3, alpha = 0.7, aes(fill=Outcome.1)) +
+  #geom_vline(xintercept = c(2.5),col="black", lwd = 0.5, linetype="dashed", alpha=1)+
+  scale_color_manual(values = c(cols.Outcome.1.assign))+
+  scale_fill_manual(values = c(cols.Outcome.1.assign))+
+  facet_wrap(~Oligo_quantile, nrow = 1) +
+  theme(legend.position = "none", aspect.ratio = 1/1,
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill ="white"),
+        panel.border = element_rect(colour = "black", fill=NA, size=0.5),
+        strip.text = element_text(size = 12, face ="bold"),              # to label add individual box
+        strip.background = element_rect(fill="white"),                    # to color individual box
+        axis.text.x = element_text(size = 12, face ="plain"),
+        # to label x-axis tics/number labels
+        axis.text.y =  element_text(size = 12, face ="plain"), # to label y-axis tics/number labels
+        axis.title.x= element_blank(),                                    # to label/remove x-axis labels
+        axis.title.y= element_blank(),                                    # to label/remove y-axis labels
+        axis.ticks = element_line(colour = "black", size = 1))
+dev.off()
+
+png("../Figures_09021_SC_mDC/Oligo/Oligo_Median_UMAP_1.png",
+    height=3, width=3, units="in", res=600)
+OLIGO.umap.Clin %>%   filter(Patient_Info != "Pt_28") %>% 
+    ggplot(aes(x = UMAP1, y = UMAP2)) +
+  geom_jitter(position = jitter_0, shape=21,size = 2, alpha = 0.5, aes(color=Oligo_quantile,fill=Oligo_quantile)) +
+  #geom_vline(xintercept = c(2.5),col="black", lwd = 0.5, linetype="dashed", alpha=1)+
+  scale_color_manual(values = c("red", "lightcoral", "lightblue", "navy"))+
+  scale_fill_manual(values = c("red", "lightcoral", "lightblue", "navy"))+
+  #facet_wrap(~Oligo_quantile, nrow = 1) +
+  theme(legend.position = "none", aspect.ratio = 1/1,
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill ="white"),
+        panel.border = element_rect(colour = "black", fill=NA, size=0.5),
+        strip.text = element_text(size = 12, face ="bold"),              # to label add individual box
+        strip.background = element_rect(fill="white"),                    # to color individual box
+        axis.text.x = element_text(size = 12, face ="plain"),
+        # to label x-axis tics/number labels
+        axis.text.y =  element_text(size = 12, face ="plain"), # to label y-axis tics/number labels
+        axis.title.x= element_blank(),                                    # to label/remove x-axis labels
+        axis.title.y= element_blank(),                                    # to label/remove y-axis labels
+        axis.ticks = element_line(colour = "black", size = 1))
+dev.off()
+```
+
+#-------------------------------
+#-------------------------------
+
+# sc UMAP Plots
+```{r}
+
+
+ss.OLIGO.umap$`HLA.DR` %>% summary()
+ss.OLIGO.umap$CD1c %>% summary()
+
+# Immune Markers
+#####
+png("../09-021_SC_mDC_Figures/UMAP_3_Immune_Composite.png",
+    height=10, width=12, units="in", res=600)
+set.seed(1) 
+ ss.OLIGO.umap %>% slice_sample(n = 25000,replace = F) %>%
+  #sample_n(size = 20000, replace = T) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, color = HLA.DR)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  xlim(-14,11)+ylim(-15,10)+
+  #facet_wrap(~ , ncol = 6)+
+  scale_color_viridis(option = "magma",limits = c(0, 1))+  # to change order use: direction = -1 & to state color limits = c(0, 0.5)
+  guides(color = guide_legend(override.aes = list(size = 4), ncol = 1))+
+  UMAP_theme + ggtitle("HLA-DR Overlay") +
+  ss.OLIGO.umap %>% slice_sample(n = 25000,replace = F) %>%
+  #sample_n(size = 20000, replace = T) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, color = CD86)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  xlim(-14,11)+ylim(-15,10)+
+  #facet_wrap(~ , ncol = 6)+
+  scale_color_viridis(option = "magma",limits = c(0, 1))+  # to change order use: direction = -1 & to state color limits = c(0, 0.5)
+  guides(color = guide_legend(override.aes = list(size = 4), ncol = 1))+
+  UMAP_theme + ggtitle("CD86 Overlay")+
+     ss.OLIGO.umap %>% slice_sample(n = 25000,replace = F) %>%
+  #sample_n(size = 20000, replace = T) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, color = PD.L1)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  xlim(-14,11)+ylim(-15,10)+
+  #facet_wrap(~ , ncol = 6)+
+  scale_color_viridis(option = "magma",limits = c(0, 1))+  # to change order use: direction = -1 & to state color limits = c(0, 0.5)
+  guides(color = guide_legend(override.aes = list(size = 4), ncol = 1))+
+  UMAP_theme + ggtitle("PD-L1 Overlay") +
+   
+  ss.OLIGO.umap %>% slice_sample(n = 25000,replace = F) %>%
+  #sample_n(size = 20000, replace = T) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, color = CD206)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  xlim(-14,11)+ylim(-15,10)+
+  #facet_wrap(~ , ncol = 6)+
+  scale_color_viridis(option = "magma",limits = c(0, 1))+  # to change order use: direction = -1 & to state color limits = c(0, 0.5)
+  guides(color = guide_legend(override.aes = list(size = 4), ncol = 1))+
+  UMAP_theme + ggtitle("CD206 Overlay")+
+   #ICOSLG
+   ss.OLIGO.umap %>% slice_sample(n = 25000,replace = F) %>%
+  #sample_n(size = 20000, replace = T) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, color = ICOSLG)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  xlim(-14,11)+ylim(-15,10)+
+  #facet_wrap(~ , ncol = 6)+
+  scale_color_viridis(option = "magma",limits = c(0, 1))+  # to change order use: direction = -1 & to state color limits = c(0, 0.5)
+  guides(color = guide_legend(override.aes = list(size = 4), ncol = 1))+
+  UMAP_theme + ggtitle("ICOSLG Overlay")+
+   
+  ss.OLIGO.umap %>% slice_sample(n = 25000,replace = F) %>%
+  #sample_n(size = 20000, replace = T) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, color = CD40)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  xlim(-14,11)+ylim(-15,10)+
+  #facet_wrap(~ , ncol = 6)+
+  scale_color_viridis(option = "magma",limits = c(0, 1))+  # to change order use: direction = -1 & to state color limits = c(0, 0.5)
+  guides(color = guide_legend(override.aes = list(size = 4), ncol = 1))+
+  UMAP_theme + ggtitle("CD40 Overlay") +
+   
+     ss.OLIGO.umap %>% slice_sample(n = 25000,replace = F) %>%
+  #sample_n(size = 20000, replace = T) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, color = CD1c)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  xlim(-14,11)+ylim(-15,10)+
+  #facet_wrap(~ , ncol = 6)+
+  scale_color_viridis(option = "magma",limits = c(0, 1))+  # to change order use: direction = -1 & to state color limits = c(0, 0.5)
+  guides(color = guide_legend(override.aes = list(size = 4), ncol = 1))+
+  UMAP_theme + ggtitle("CD1c Overlay") +
+   
+   ss.OLIGO.umap %>% slice_sample(n = 25000,replace = F) %>%
+  #sample_n(size = 20000, replace = T) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, color = CD141)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  xlim(-14,11)+ylim(-15,10)+
+  #facet_wrap(~ , ncol = 6)+
+  scale_color_viridis(option = "magma",limits = c(0, 1))+  # to change order use: direction = -1 & to state color limits = c(0, 0.5)
+  guides(color = guide_legend(override.aes = list(size = 4), ncol = 1))+
+  UMAP_theme + ggtitle("CD141 Overlay")+
+ 
+ ss.OLIGO.umap %>% slice_sample(n = 25000,replace = F) %>%
+  #sample_n(size = 20000, replace = T) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, color = ILT3)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  xlim(-14,11)+ylim(-15,10)+
+  #facet_wrap(~ , ncol = 6)+
+  scale_color_viridis(option = "magma",limits = c(0, 1))+  # to change order use: direction = -1 & to state color limits = c(0, 0.5)
+  guides(color = guide_legend(override.aes = list(size = 4), ncol = 1))+
+  UMAP_theme + ggtitle("ILT3 Overlay") +  theme(legend.position = "right")
+dev.off()
+#####
+
+# Metabolic Markers
+#####
+ss.OLIGO.umap$HLA.DR %>% summary()
+png("../09-021_SC_mDC_Figures/UMAP_3_Metab_Composite.png",
+    height=6, width=8, units="in", res=600)
+set.seed(1) 
+ #p.AMPK
+ ss.OLIGO.umap %>% slice_sample(n = 25000,replace = F) %>%
+  #sample_n(size = 20000, replace = T) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, color = p.AMPK)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  xlim(-14,11)+ylim(-15,10)+
+  #facet_wrap(~ , ncol = 6)+
+  scale_color_viridis(option = "magma",limits = c(0, 1))+  # to change order use: direction = -1 & to state color limits = c(0, 0.5)
+  guides(color = guide_legend(override.aes = list(size = 4), ncol = 1))+
+  UMAP_theme + ggtitle("p.AMPK Overlay") +
+#total.AMPK
+  ss.OLIGO.umap %>% slice_sample(n = 25000,replace = F) %>%
+  #sample_n(size = 20000, replace = T) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, color = total.AMPK)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  xlim(-14,11)+ylim(-15,10)+
+  #facet_wrap(~ , ncol = 6)+
+  scale_color_viridis(option = "magma",limits = c(0, 1))+  # to change order use: direction = -1 & to state color limits = c(0, 0.5)
+  guides(color = guide_legend(override.aes = list(size = 4), ncol = 1))+
+  UMAP_theme + ggtitle("total AMPK Overlay")+
+# p.mTOR
+  ss.OLIGO.umap %>% slice_sample(n = 25000,replace = F) %>%
+  #sample_n(size = 20000, replace = T) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, color = p.mTOR)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  xlim(-14,11)+ylim(-15,10)+
+  #facet_wrap(~ , ncol = 6)+
+  scale_color_viridis(option = "magma",limits = c(0, 1))+  # to change order use: direction = -1 & to state color limits = c(0, 0.5)
+  guides(color = guide_legend(override.aes = list(size = 4), ncol = 1))+
+  UMAP_theme + ggtitle("p.mTOR Overlay") +
+# total.mTOR 
+  ss.OLIGO.umap %>% slice_sample(n = 25000,replace = F) %>%
+  #sample_n(size = 20000, replace = T) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, color = total.mTOR)) +
+  geom_point(size = 0.05, alpha = 0.7) +
+  xlim(-14,11)+ylim(-15,10)+
+  #facet_wrap(~ , ncol = 6)+
+  scale_color_viridis(option = "magma",limits = c(0, 1))+  # to change order use: direction = -1 & to state color limits = c(0, 0.5)
+  guides(color = guide_legend(override.aes = list(size = 4), ncol = 1))+
+  UMAP_theme + ggtitle("total mTOR Overlay") +  theme(legend.position = "right",
+                                                      legend.key = element_rect(colour = NA, fill = NA))
+dev.off()
+ #####
+
+# Oligo_quantile
+#####
+png("../Figures_09021_SC_mDC/UMAPs//UMAP_2_Resp_Composite.png",
+    height=3.5, width=12, units="in", res=600)
+set.seed(1) 
+ss.OLIGO.umap %>% slice_sample(n = 15000,replace = F) %>% 
+  #sample_n(size = 20000, replace = T) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, color = Oligo_quantile)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  xlim(-14,11)+ylim(-15,10)+
+  #facet_wrap(~ , ncol = 6)+
+  scale_color_manual(values = c("red", "lightcoral", "lightblue", "navy")) +
+  guides(color = guide_legend(override.aes = list(size = 4), ncol = 1)) +
+  UMAP_theme + ggtitle("Oligomycin Quantile UMAP") + theme(legend.position = "right",
+                                                      legend.key = element_rect(colour = NA, fill = NA)) +
+  ss.OLIGO.umap %>% slice_sample(n = 15000,replace = F) %>% 
+  #sample_n(size = 20000, replace = T) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, color = Response)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  xlim(-14,11)+ylim(-15,10)+
+  #facet_wrap(~ , ncol = 6)+
+  #scale_color_viridis(option = "magma",limits = c(0, 1))+  # to change order use: direction = -1 & to state color limits = c(0, 0.5)
+  guides(color = guide_legend(override.aes = list(size = 4), ncol = 1))+
+  UMAP_theme + ggtitle("Puromycin Overlay")+  theme(legend.position = "right",
+                                                      legend.key = element_rect(colour = NA, fill = NA))
+dev.off()
+#####
+
+
+png("../Figures_09021_SC_mDC/UMAPs/Oligo_Quantiles_UPMAP.png",
+    height=3.5, width=12, units="in", res=600)
+ss.OLIGO.umap %>% ggplot(aes(x= Puromycin)) +
+  geom_density(aes(fill=Oligo_quantile),alpha = 0.75)+
+  scale_fill_manual(values = c("red", "lightcoral", "lightblue", "navy")) +
+  guides(color = guide_legend(override.aes = list(size = 4), ncol = 1)) +
+  UMAP_theme + ggtitle("Oligomycin Quantile UMAP") + theme(legend.position = "right", aspect.ratio = 1/2,
+                                                      legend.key = element_rect(colour = NA, fill = NA)) +
+ ss.OLIGO.umap %>% slice_sample(n = 15000,replace = F) %>% 
+  #sample_n(size = 20000, replace = T) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, color = Oligo_quantile)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  xlim(-14,11)+ylim(-15,10)+
+  #facet_wrap(~ , ncol = 6)+
+  scale_color_manual(values = c("red", "lightcoral", "lightblue", "navy")) +
+  guides(color = guide_legend(override.aes = list(size = 4), ncol = 1)) +
+  UMAP_theme + ggtitle("Oligomycin Quantile UMAP") + theme(legend.position = "right",
+                                                      legend.key = element_rect(colour = NA, fill = NA)) 
+dev.off()
+
+
+set.seed(1) 
+ss.OLIGO.umap %>% slice_sample(n = 25000,replace = F) %>% 
+  #sample_n(size = 20000, replace = T) %>%
+  ggplot(aes(x = p.mTOR, y = p.AMPK, color = Oligo_quantile)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  #xlim(-14,11)+ylim(-15,10)+
+  #facet_wrap(~ , ncol = 6)+
+  scale_color_manual(values = c("red", "lightcoral", "lightblue", "navy")) +
+  guides(color = guide_legend(override.aes = list(size = 4), ncol = 1)) +
+  UMAP_theme + ggtitle("Oligomycin Quantile UMAP") + theme(legend.position = "right",
+                                                      legend.key = element_rect(colour = NA, fill = NA))
+
+ss.OLIGO.umap %>% slice_sample(n = 25000,replace = F) %>% 
+  #sample_n(size = 20000, replace = T) %>%
+  ggplot(aes(x = ICOSLG, y = CD86, color = Oligo_quantile)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  #xlim(-14,11)+ylim(-15,10)+
+  #facet_wrap(~ , ncol = 6)+
+  scale_color_manual(values = c("red", "lightcoral", "lightblue", "navy")) +
+  guides(color = guide_legend(override.aes = list(size = 4), ncol = 1)) +
+  UMAP_theme + ggtitle("Oligomycin Quantile UMAP") + theme(legend.position = "right",
+                                                      legend.key = element_rect(colour = NA, fill = NA))
+
+
+# Response colors and medians
+#####
+png("../09-021_SC_mDC_Figures/UMAP_1_Resp_Composite.png",
+    height=3.5, width=12, units="in", res=600)
+set.seed(1) 
+ss.OLIGO.umap %>% slice_sample(n = 35000,replace = F) %>%
+  #sample_n(size = 20000, replace = T) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, color = Response)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  xlim(-14,11)+ylim(-15,10)+
+
+  #facet_wrap(~ , ncol = 6)+
+  scale_color_manual(values = c(cols.Response.assign)) +
+  guides(color = guide_legend(override.aes = list(size = 4), ncol = 1))+
+  UMAP_theme + ggtitle("Single Cell UMAP") +
+  ss.OLIGO.umap %>% #slice_sample(n = 50000,replace = F) %>%
+  group_by(Patient_Info,Response) %>% 
+  dplyr::summarise(across(where(is.numeric), ~ median(.x, na.rm = TRUE))) %>% 
+  #sample_n(size = 20000, replace = T) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, color = Response)) +
+  geom_point(size = 2, alpha = 0.5) +
+  # geom_text_repel(aes(label = Patient_Info,col=Outcome.1), alpha=0.95,size = 2,
+  #                 box.padding = unit(0.1, "lines"))+
+  xlim(-14,11)+ylim(-15,10)+
+  #facet_wrap(~ , ncol = 6)+
+  scale_color_manual(values = c(cols.Response.assign)) +
+  guides(color = guide_legend(override.aes = list(size = 4), ncol = 1))+
+  UMAP_theme + ggtitle("Median UMAP") +
+    ss.OLIGO.umap %>% #slice_sample(n = 50000,replace = F) %>%
+  group_by(Patient_Info,Response) %>% 
+  dplyr::summarise(across(where(is.numeric), ~ median(.x, na.rm = TRUE))) %>% 
+  #sample_n(size = 20000, replace = T) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, color = Response)) +
+  geom_point(size = 3, alpha = 0.5) +
+  # geom_text_repel(aes(label = Patient_Info,col=Outcome.1), alpha=0.95,size = 2,
+  #                 box.padding = unit(0.1, "lines"))+
+  xlim(-11,9)+ylim(-3.5,3.5)+
+  #facet_wrap(~ , ncol = 6)+
+  scale_color_manual(values = c(cols.Response.assign)) +
+  guides(color = guide_legend(override.aes = list(size = 4), ncol = 1))+
+ UMAP_theme + ggtitle("Zoom in Median UMAP") +theme(legend.position = "right",
+                                                      legend.key = element_rect(colour = NA, fill = NA))
+dev.off()
+
+
+png("/home/juraj/JA_R_Notes/JAFCM111/09-021_SC_mDC_Figures/UMAP_2_Tcell_Composite.png",
+    height=3.5, width=12, units="in", res=600)
+set.seed(1) 
+ss.OLIGO.umap %>% filter(!is.na(CD8_Resp_Per_Patient)) %>%  slice_sample(n = 25000,replace = F) %>%
+  #sample_n(size = 20000, replace = T) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, color = CD8_Resp_Per_Patient)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  xlim(-14,11)+ylim(-15,10)+
+  #facet_wrap(~ , ncol = 6)+
+  scale_color_manual(values = c(cols.T_cell.assign)) +
+  guides(color = guide_legend(override.aes = list(size = 4), ncol = 1))+
+  UMAP_theme + ggtitle("CD8 Response") +
+
+  ss.OLIGO.umap %>% filter(!is.na(CD4_Resp_Per_Patient)) %>%  slice_sample(n = 25000,replace = F) %>%
+  #sample_n(size = 20000, replace = T) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, color = CD4_Resp_Per_Patient)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  xlim(-14,11)+ylim(-15,10)+
+  #facet_wrap(~ , ncol = 6)+
+  scale_color_manual(values = c(cols.T_cell.assign)) +
+  guides(color = guide_legend(override.aes = list(size = 4), ncol = 1))+
+  UMAP_theme + ggtitle("CD4 Response") +
+ 
+  ss.OLIGO.umap %>% filter(!is.na(CD8.CD4_Resp_Per_Patient)) %>%  slice_sample(n = 25000,replace = F) %>%
+  #sample_n(size = 20000, replace = T) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, color = CD8.CD4_Resp_Per_Patient)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  xlim(-14,11)+ylim(-15,10)+
+  #facet_wrap(~ , ncol = 6)+
+  scale_color_manual(values = c(cols.T_cell.assign)) +
+  guides(color = guide_legend(override.aes = list(size = 4), ncol = 1))+
+  UMAP_theme + ggtitle("CD8+CD4 Response")+
+  labs(colour= "T cell Response",
+       fill= "T cell Response")+
+
+  theme(legend.position = "right",legend.key = element_rect(colour = NA, fill = NA))
+dev.off()
+#####
+
+# Metabolic Markers
+#####
+ss.OLIGO.umap$CD98 %>% summary()
+png("../09-021_SC_mDC_Figures/UMAP_3_CD98_CD36.png",
+    height=3, width=8, units="in", res=600)
+set.seed(1) 
+ #p.AMPK
+ ss.OLIGO.umap %>% slice_sample(n = 25000,replace = F) %>%
+  #sample_n(size = 20000, replace = T) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, color = ICOSLG)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  xlim(-14,11)+ylim(-15,10)+
+  #facet_wrap(~ , ncol = 6)+
+  scale_color_viridis(option = "inferno",limits = c(0, 1))+  # to change order use: direction = -1 & to state color limits = c(0, 0.5)
+  guides(color = guide_legend(override.aes = list(size = 4), ncol = 1))+
+  UMAP_theme + ggtitle("ICOSLG Overlay") +
+#total.AMPK
+  ss.OLIGO.umap %>% slice_sample(n = 25000,replace = F) %>%
+  #sample_n(size = 20000, replace = T) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, color = HLA.DR)) +
+  geom_point(size = 0.05, alpha = 0.35) +
+  xlim(-14,11)+ylim(-15,10)+
+  #facet_wrap(~ , ncol = 6)+
+  scale_color_viridis(option = "magma",limits = c(0, 1))+  # to change order use: direction = -1 & to state color limits = c(0, 0.5)
+  guides(color = guide_legend(override.aes = list(size = 4), ncol = 1))+
+  UMAP_theme + ggtitle("CD36 Overlay")
+
+dev.off()
+ #####
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

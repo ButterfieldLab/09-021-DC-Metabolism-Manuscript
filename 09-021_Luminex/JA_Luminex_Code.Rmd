@@ -1,0 +1,495 @@
+---
+title: "R Notebook JACyTOF2 NEW"
+output: html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+# Load Libraries
+```{r}
+library(data.table)
+library(magrittr) # for %<>% function
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+library(stringr)
+#source("/R_work/R_functions.r")
+library(readxl)
+library(viridis)
+library(data.table)
+library(janitor)
+library(ggpubr)
+library(ComplexHeatmap)
+library(circlize) 
+library(rstatix)
+library(gridBase)
+library(randomcoloR)
+library(RColorBrewer)
+library(tidytext)
+library(cowplot)
+library(reshape2)
+library(vegan)
+library(ggrepel)
+```
+
+
+# Read in Luminex_Table
+```{r, include=FALSE}
+# load functions library
+getwd()
+
+list.files("../DC_Luminex_Data/")
+# read in panel
+DC_luminex <-  read_excel("../DC_Luminex_Data/DC_Luminex_Original_Table_JA.xlsx", sheet = 1) 
+glimpse(DC_luminex)
+ DC_luminex %<>% mutate(MCP2 = as.numeric(MCP2)) %>% 
+  dplyr::mutate_if(is.character, as.factor) 
+
+DC_luminex %<>% mutate(Patient_Info = case_when(
+    grepl("^HD", DC_luminex$Patient) ~ paste(str_extract(DC_luminex$Patient, "HD[0-9]+"),"", sep = ""),
+  grepl('Pt', DC_luminex$Patient) ~ paste("Pt_", str_extract(DC_luminex$Patient, "[0-9]+"),sep = ""))) %>% select(Patient_Info, Patient_HD_ID:TIM3)
+glimpse(DC_luminex)
+
+read.csv("/Users/jadamik/Documents/Butterfield_Lab/09_021_Clinical_Tables/09_021_Clinl_Final.Table_06122022.csv") %>% 
+    dplyr::mutate_if(is.character, as.factor) ->
+  Clinical_DF
+setdiff(DC_luminex$Patient_HD_ID , Clinical_DF$Patient_CPL_Code)
+
+FULL_Luminex <- full_join(DC_luminex, Clinical_DF, by =c("Patient_HD_ID" = "Patient_CPL_Code"))
+FULL_Luminex$Outcome
+
+
+FULL_Luminex %<>% mutate(Response = ifelse(is.na(Response),"HD", paste0(Response))) %>% 
+  mutate(Response = as.factor(Response))
+
+FULL_Luminex %<>% mutate(Outcome = ifelse(is.na(Outcome),"HD", paste0(Outcome))) %>% 
+  mutate(Outcome = as.factor(Outcome)) 
+FULL_Luminex %<>% mutate(Outcome.1 = ifelse(is.na(Outcome.1),"HD", paste0(Outcome.1))) %>% 
+  mutate(Outcome.1 = as.factor(Outcome.1)) 
+
+```
+# Levels
+```{r}
+FULL_Luminex$Response <- factor(FULL_Luminex$Response, levels=c("HD","PR","SD","NED1","NED2","PD"))
+FULL_Luminex$Outcome.1 <- factor(FULL_Luminex$Outcome.1, levels=c("HD","Good","Stable","Bad"))
+FULL_Luminex$Outcome <- factor(FULL_Luminex$Outcome, levels=c("HD","Good","Bad"))
+
+FULL_Luminex$Patient_Info_DC <- paste(FULL_Luminex$Patient_Info, FULL_Luminex$DC_Stage, sep="_")
+```
+
+
+# load Clinical Metadata
+```{r, include=FALSE}
+
+Viabl_Lct_Gluc <-  read_excel("../Viability_Gluc_Lact_Tables/Patient Lactate and Glucose levels1.xlsx", sheet = 1)
+Viabl_Lct_Gluc %<>% mutate_at(vars(Glucose_1:Lactate_2), ~ as.numeric(.)) %>%
+  mutate_if(is.character, as.factor)
+
+Viabl_Lct_Gluc %<>%  
+  mutate(Lactate = ((Lactate_1+Lactate_2)/2)/Count*1000000,
+                          Glucose = ((Glucose_1+Glucose_2+Glucose_3)/3)/Count*1000000) %>%
+  mutate(Patient_Info = case_when(
+  grepl('^[0-9]',`Patient_Number`) ~ paste0("Pt_", Patient_Number),
+  grepl("HD",Patient_Number) ~ paste0("", Patient_Number))) %>% 
+  mutate(Patient_Info_DC = paste(Patient_Info, DC_Type, sep = "_")) %>% 
+  select(Patient_Info_DC,Patient_Info,Patient_Number:CPL_Code,Lactate,Glucose)
+
+FULL_Luminex.mDC <- FULL_Luminex %>% filter(DC_Stage == "mDC")
+FULL_Luminex.mDC$Patient_Info_DC
+
+FULL_Luminex.mDC.Gluc <- left_join(FULL_Luminex.mDC, Viabl_Lct_Gluc %>% select(Patient_Info_DC,Lactate, Glucose), by ="Patient_Info_DC")
+```
+
+# Read in Clinical table
+```{r}
+glimpse(DC_luminex)
+DC_luminex.Tidy <- FULL_Luminex %>%  mutate(ID=row_number()) %>% gather(Metabolite, Value, APRIL:TIM3)
+head(DC_luminex.Tidy)
+
+FULL_Luminex$Response
+metabolites <- dput(as.character(colnames(DC_luminex %>% select(APRIL:TIM3))))
+metabolites
+c("APRIL", "BAFF", "CXCL13", "CD30", "ENA78", "Eotaxin", "Eotaxin2", 
+"Eotaxin3", "FGF2", "Fractalkine", "GCSF", "GROAlpha", "HGF", 
+"IFNAlpha", "IL1Alpha", "IL1Beta", "IL10", "IL15", "IL16", "IL17A", 
+"IL18", "IL2R", "IL20", "IL21", "IL22", "IL23", "IL27", "IL3", 
+"IL31", "IL4", "IL5", "IL6", "IL7", "IL8", "IL9", "IP10", "ITAC", 
+"LIF", "MCP1", "MCP2", "MCP3", "MCSF", "MDC", "MIF", "MIG", "MIP1A", 
+"MIP3A", "MMP1", "sCD40L", "SDF1A", "TNFA", "TNFB", "TNFRII", 
+"TRAIL", "TSLP", "TWEAK", "VEGFA", "IL12p70", "BTLA", "41BB", 
+"CTLA4", "CD27", "CD80", "GITR", "HVEM", "IDO", "LAG3", "PDL1", 
+"PDL2", "PD1", "TIM3")
+
+```
+
+#HEATMAP ----------
+```{r}
+# here I can choose which markers will be used for clustering 
+#####################
+FULL_Luminex
+DC_luminex_HEAT <- FULL_Luminex.mDC.Gluc %>% filter(DC_Stage == "mDC") %>% 
+  mutate_at(vars(all_of(metabolites),Lactate, Glucose), ~ normalize(.)+0.01)
+#Immune_Metab_HEAT %<>% mutate_at(vars(HLA.DR:total.AMPK,Glucose_Dep:Glnlysis_Dep, all_of(Metabolic_markers)), ~ log10(.))
+
+DC_luminex_HEAT_m <- DC_luminex_HEAT %>% select(all_of(metabolites)) %>% as.matrix()
+
+rownames(DC_luminex_HEAT_m) <- DC_luminex_HEAT$Patient_Info_DC
+```
+
+```{r}
+# DEFINING LABELING and COLORS FOR HEAT MAP
+
+########
+# Here I combine all vectors into 1 
+
+Response = HeatmapAnnotation(Response = DC_luminex_HEAT$Response,
+                          col = list(Response = c("HD" = "magenta", 
+                                                   "PR" = "red", 
+                                                   "SD" = "green",
+                                                     "NED1" = "lightblue", 
+                                                   "NED2" = "blue",
+                                                   "PD" = "grey45")),
+                          gp = gpar(col = "black"),
+                          simple_anno_size = unit(0.5, "cm"),
+                          annotation_name_gp= gpar(fontsize = 12))
+
+
+############################################################---------------------------------------------------------#
+CD8 = HeatmapAnnotation(`CD8 Response` = DC_luminex_HEAT$CD8_Resp_Per_Patient,
+                          col = list(`CD8 Response` = c("Yes" = "red", 
+                                                 "No" = "grey50"
+                                                 )),
+                          gp = gpar(col = "black"),
+                          simple_anno_size = unit(0.3, "cm"),
+                          annotation_name_gp= gpar(fontsize = 12))
+
+CD4 = HeatmapAnnotation(`CD4 Response` = DC_luminex_HEAT$CD4_Resp_Per_Patient,
+                          col = list(`CD4 Response` = c("Yes" = "red", 
+                                                 "No" = "grey50"
+                                                 )),
+                          gp = gpar(col = "black"),
+                          simple_anno_size = unit(0.3, "cm"),
+                          annotation_name_gp= gpar(fontsize = 12))
+
+CD8.CD4 = HeatmapAnnotation(`CD8+CD4 Response` = DC_luminex_HEAT$CD8.CD4_Resp_Per_Patient,
+                          col = list(`CD8+CD4 Response` = c("Yes" = "red", 
+                                                 "No" = "grey50"
+                                                 )),
+                          gp = gpar(col = "black"),
+                          simple_anno_size = unit(0.3, "cm"),
+                          annotation_name_gp= gpar(fontsize = 12))
+COMBO <- c(CD8,CD4,CD8.CD4,gap = unit(c(0.8,0.8,08), "mm"))
+
+# Here I am transposing an exeisting table to extract the markers
+# and use them to group catagories for labeling
+################################################
+################################################
+# If I want to add metabolic parameters
+Mito_Dep <- c(DC_luminex_HEAT$Mito_Dep)
+Gluc_Dep <- c(DC_luminex_HEAT$Glucose_Dep)
+Glycolytic_Capacity <- c(DC_luminex_HEAT$Glyco_Cap)
+FAAO <- c(DC_luminex_HEAT$FAAO)
+FAO_Dep <- c(DC_luminex_HEAT$FAO_Dep)
+Glnlysis_Dep <- c(DC_luminex_HEAT$Glnlysis_Dep)
+summary(FAO_Dep)
+
+Together = HeatmapAnnotation(
+  'Glucose Dependence' = anno_barplot((Gluc_Dep),ylim = c(0, 110),
+                                      bar_width = 0.9,
+                                      height = unit(1, "cm"),axis = TRUE,
+                                      gp=gpar(border =NA,fill="black",lty="blank")),
+  'Mitochondrial Dependence' = anno_barplot((Mito_Dep),ylim = c(0, 120),
+                                            bar_width = 0.9,
+                                            height = unit(1, "cm"),axis = TRUE,
+                                            gp=gpar(border =NA,fill="blue",lty="blank")),
+  'Glycolytic Capacity' = anno_barplot((Glycolytic_Capacity),ylim = c(0, 70),
+                                       bar_width = 0.9,
+                                       height = unit(1, "cm"),axis = TRUE,
+                                       gp=gpar(border =NA,fill="red",lty="blank")),
+  'FAAO' = anno_barplot((FAAO),ylim = c(0, 140),
+                        bar_width = 0.9,
+                        height = unit(1, "cm"),axis = TRUE,
+                        gp=gpar(border =NA,fill="purple",lty="blank")),
+  'FAO Dependence' = anno_barplot((FAO_Dep),ylim = c(-20, 40),
+                        bar_width = 0.9,
+                        height = unit(1, "cm"),axis = TRUE,
+                        gp=gpar(border =NA,fill="dodgerblue",lty="blank")),
+  'Glnlysis Dependence' = anno_barplot((Glnlysis_Dep),ylim = c(-20, 50),
+                        bar_width = 0.9,
+                        height = unit(1, "cm"),axis = TRUE,
+                        gp=gpar(border =NA,fill="magenta",lty="blank")),
+  gap = unit(c(1.2,1.2,1.2,1.2,1.2), "mm"), annotation_name_gp= gpar(fontsize = 14))
+
+
+Metabolic_Param_Combo <- c(Together,  gap = unit(c(0.5), "mm"))
+
+############################################################---------------------------------------------------------#
+##### LACTATE
+LAC_Expression_vec <- c(DC_luminex_HEAT$Lactate)
+summary(LAC_Expression_vec)
+
+LAC_Line = HeatmapAnnotation('Lactate'= anno_points((LAC_Expression_vec),ylim = c(0, 1.1),pch = 17,
+                                                              height = unit(1, "cm")),
+                             annotation_name_gp= gpar(fontsize = 10))
+                                                                
+##### GLUCOSE
+
+Gluc_vec <- c(DC_luminex_HEAT$Glucose)
+summary(Gluc_vec)
+GLUC_Line = HeatmapAnnotation('Glucose'= anno_points((Gluc_vec),ylim = c(0, 1.1),pch = 19,
+                                                height = unit(1, "cm")),
+                              annotation_name_gp= gpar(fontsize = 10))                              
+                              
+                              
+Together = HeatmapAnnotation('Glucose' = anno_points((Gluc_vec),ylim = c(0, 1.1),pch = 19,
+                                                     height = unit(1.25, "cm")),
+                             'Lactate'= anno_points((LAC_Expression_vec),ylim = c(0, 1),pch = 17,
+                                                              height = unit(1.25, "cm")),
+                             gap = unit(c(0.8,10), "mm"),annotation_name_gp= gpar(fontsize = 12))
+
+# Here I combine all IMMUNE Vectors with Metabolic ones  
+#Combination <- c(Together, Metabolic_Param_Combo, gap = unit(c(1.2), "mm"))
+# Combination of 
+
+############################################################---------------------------------------------------------#
+################################ ################################ ################################
+# I am transposing the heatmap to have column = samples and rows = Markers
+New_Heat <- t(DC_luminex_HEAT_m)
+dend = hclust(dist(New_Heat))
+dend = color_branches(dend, k = 6)
+###############################################
+
+png("../Figures_Luminex/HEATMAP/Heatmap_1.png",
+    height=15, width=10, units="in", res=600)
+Heatmap(New_Heat, name = "Marker Level", #clustering_distance_rows = function(x, y) 1 - cor(x, y),
+        row_names_gp = gpar(fontsize = 10),
+        show_column_names = FALSE,
+        height = unit(200, "mm"),
+        width = unit(100, "mm"),
+        column_split = c(DC_luminex_HEAT$Response),
+        row_split = 6,
+        border = TRUE,
+        heatmap_legend_param = list(direction = "horizontal"),
+        #column_split  = 2,
+        viridis(10, begin = 0, end = 1, option = "inferno"),
+        #col = rev(brewer.pal(n = 11, name = "Spectral")),
+        #col = wes_palette("Moonrise1"),
+        #col = rev(rainbow(7)),
+        #col = col_fun,
+        rect_gp = gpar(col = "white", lwd = 1),
+        column_title = "mDC Luminex Profiling",
+        cluster_rows = T,
+        top_annotation = c(Response),
+        bottom_annotation = c(COMBO),
+        row_title = "Luminex Markers",
+        #row_title_gp = gpar(fontfamily = "sans", fontsize = 12),
+        # left_annotation = CATEGORIES,
+        column_title_gp = gpar(fontfamily = "sans", fontsize = 12))
+dev.off()
+```
+# ----------------------------
+
+```{r}
+DC_luminex.Tidy
+```
+
+3 outcome groups (HD, Good, Bad)
+```{r}
+glimpse(DC_luminex.Tidy.model)
+DC_luminex.Tidy.model <- DC_luminex.Tidy  %>% filter(DC_Stage == "mDC") %>% 
+  mutate(Value = normalize(Value)+0.01)  %>%
+  mutate(Value = log10(Value)) %>% 
+  mutate(Outcome.1_Rank = case_when(
+  Outcome %in% c("HD") ~ 3,
+  Outcome %in% c("Good") ~ 2,
+  Outcome %in% c("Bad") ~ 1
+))
+DC_luminex.Tidy.model$Metabolite
+
+Pre.lm_full <- DC_luminex.Tidy.model %>%  nest(data = -Metabolite) %>%  
+  #filter(Cell.Type != "CD8:Treg Ratio") %>% 
+	mutate(
+		lm_out_full = map(data, ~lm(Outcome.1_Rank ~ Value, data=.x %>% filter(!is.na(Outcome.1_Rank)) %>% mutate(Outcome.1_Rank=as.numeric(Outcome.1_Rank)))),
+		pval_full = map_dbl(lm_out_full, ~.x %>% broom::tidy() %>% filter(term=="Value") %>% pull(p.value)),
+	)
+
+Pre.lm_full %>% select(-data, -lm_out_full) %>% arrange(pval_full)
+
+Plot_Outcome.1 <- Pre.lm_full %>% mutate(tidied = map(lm_out_full,conf.int = TRUE, tidy)) %>% 
+  unnest(tidied) %>% select(-data, -lm_out_full) %>% filter(term == "Value") %>%  mutate_if(is.character,as.factor) %>% arrange(pval_full) 
+
+Plot_Outcome.1 %<>% mutate(sig_value=round(p.value,3))
+
+png("../Figures_Luminex/Linear_Regressions/Forest_Lregression_Outcome(3categ).png",
+     height=12, width=12, units="in", res=600)
+
+Plot_Outcome.1  %>% filter(sig_value < 0.05) %>% 
+  ggplot(aes(x= estimate , y= fct_reorder(Metabolite,-sig_value), xmin=conf.low, xmax=conf.high, label = sig_value)) +
+  geom_text(nudge_x = 0.0, nudge_y = 0.4, size=5,color = "black") +
+  geom_pointrange()+ # Makes range for ggplot values based on the data and AES specified in first line
+  geom_errorbar(aes(xmin=conf.low, xmax=conf.high), width=0, cex=0.7)+ # Makes whiskers on the range (more aesthetically pleasing)
+  #coord_flip() + # flip coordinates (puts labels on y axis)
+  geom_point(shape = 10, size = 2.5) + # specifies the size and shape of the geompoint
+  geom_vline(xintercept = 0, color = "red", linetype = "dashed", cex = 1, alpha = 0.5) +
+    scale_y_discrete(expand = expansion(mult = c(0.1, 0.1)))+
+
+  ggtitle("Luminex (3 binary) Outcome Linear Regression")+ # Blank Title for the Graph
+  xlab(" (95% CI)") + 
+  ylab("Luminex Markers") +
+   theme(aspect.ratio = 1/1.1,
+        plot.title = element_text(size = 14, face = "bold"),
+        line = element_line(colour = "black", size = 2), # My personal theme for GGplots
+        strip.background = element_rect(fill=NA), 
+        legend.position ="none", 
+        axis.line.x = element_line(colour = "black"), 
+        axis.line.y = element_blank(), 
+        panel.border= element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        panel.background = element_blank(),
+        axis.text.y = element_text(face="plain", color="black",size=14),  # to label y-axis tics/number labels
+        axis.text.x = element_text(face="plain", color="black",size=14),  # to label y-axis tics/number labels
+        axis.title.x = element_text(face="plain", color="black",size=12, angle = 0,vjust = 0),
+        axis.title.y = element_text(face="plain", color="black",size=18,vjust = 0),                                    
+        axis.ticks = element_blank())
+dev.off() 
+```
+
+### 2.Linear Regression SCENITH
+2 outcome groups (Good, Bad) # basically a t-test
+```{r}
+DC_luminex.Tidy.Model.2 <-  DC_luminex.Tidy  %>% filter(DC_Stage == "mDC") %>% 
+  mutate(Value = normalize(Value)+0.01)  %>%
+  mutate(Value = log10(Value)) %>% 
+  mutate(Outcome.1_Rank = case_when(
+  Outcome %in% c("Good") ~ 2,
+  Outcome %in% c("Bad") ~ 1
+))
+DC_luminex.Tidy.Model.2$Value
+
+Pre.lm_full <- DC_luminex.Tidy.Model.2 %>%  nest(data=-Metabolite) %>%  
+  #filter(Cell.Type != "CD8:Treg Ratio") %>% 
+	mutate(
+		lm_out_full = map(data, ~lm(Outcome.1_Rank ~ Value, data=.x %>% filter(!is.na(Outcome.1_Rank)) %>% mutate(Outcome.1_Rank=as.numeric(Outcome.1_Rank)))),
+		pval_full = map_dbl(lm_out_full, ~.x %>% broom::tidy() %>% filter(term=="Value") %>% pull(p.value)),
+	)
+
+Pre.lm_full %>% select(-data, -lm_out_full) %>% arrange(pval_full)
+
+Plot_Outcome.2 <- Pre.lm_full %>% mutate(tidied = map(lm_out_full,conf.int = TRUE, tidy)) %>% 
+  unnest(tidied) %>% select(-data, -lm_out_full) %>% filter(term == "Value") %>%  mutate_if(is.character,as.factor) %>% arrange(pval_full) 
+
+Plot_Outcome.2 %<>% mutate(sig_value=round(p.value,4))
+dput(as.character(Plot_Outcome.2  %>%  filter(sig_value < 0.05) %>% pull(Metabolite)))
+
+png("../Figures_Luminex/Linear_Regressions/Forest_Lregression_Outcome(2categ).png",
+     height=7, width=8, units="in", res=600)
+
+Plot_Outcome.2  %>%  filter(sig_value < 0.05) %>% 
+  ggplot(aes(x= estimate , y= fct_reorder(Metabolite,-sig_value), xmin=conf.low, xmax=conf.high, label = sig_value)) +
+  geom_text(nudge_x = 7, nudge_y = 0.4, size=4,color = "black") +
+  geom_pointrange()+ # Makes range for ggplot values based on the data and AES specified in first line
+  geom_errorbar(aes(xmin=conf.low, xmax=conf.high), width=0, cex=0.7)+ # Makes whiskers on the range (more aesthetically pleasing)
+  #coord_flip() + # flip coordinates (puts labels on y axis)
+  geom_point(shape = 10, size = 2.5) + # specifies the size and shape of the geompoint
+  geom_vline(xintercept = 0, color = "red", linetype = "dashed", cex = 1, alpha = 0.5) +
+      scale_y_discrete(expand = expansion(mult = c(0.025, 0.05)))+
+  ggtitle("Luminex (2 binary) Outcome Linear Regression")+ # Blank Title for the Graph
+  xlab(" (95% CI)") + 
+  ylab("Luminex Markers") +
+   theme(aspect.ratio = 1/0.7,
+        plot.title = element_text(size = 14, face = "bold"),
+        line = element_line(colour = "black", size = 2), # My personal theme for GGplots
+        strip.background = element_rect(fill=NA), 
+        legend.position ="none", 
+        axis.line.x = element_line(colour = "black"), 
+        axis.line.y = element_blank(), 
+        panel.border= element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        panel.background = element_blank(),
+        axis.text.y = element_text(face="plain", color="black",size=14),  # to label y-axis tics/number labels
+        axis.text.x = element_text(face="plain", color="black",size=14),  # to label y-axis tics/number labels
+        axis.title.x = element_text(face="plain", color="black",size=12, angle = 0,vjust = 0),
+        axis.title.y = element_text(face="plain", color="black",size=14,vjust = 0),                                    
+        axis.ticks = element_blank())
+dev.off() 
+```
+
+```{r}
+#####################
+t_test <-scMEP_VLG_SC_Seahorse %>% filter(DC_Type == "mDC") %>% 
+  filter(!is.na(CD8_Resp_Per_Patient)) %>% 
+  wilcox_test(Glucose ~ CD8_Resp_Per_Patient) %>% add_y_position()
+
+Plot <- DC_luminex.Tidy  %>% filter(DC_Stage == "mDC") %>% 
+  mutate(Value = normalize(Value)+0.01)
+
+Tukey.Res <- make_tukey_test(Plot  %>% filter(DC_Stage == "mDC") %>% 
+                               filter(Metabolite %in% c("LAG3", "TNFA", "IL4", "MIP3A", "GCSF", "CD80", "MCP1", "TIM3", 
+"ITAC", "sCD40L", "IL5", "IL18", "Eotaxin3", "IFNAlpha", "IL22", 
+"IL12p70", "SDF1A", "VEGFA", "IL23", "IL1Alpha", "IL21", "IL6", 
+"IL3", "CXCL13", "IL16", "IL31", "MIP1A", "IL15", "IL1Beta", 
+"IDO", "TNFRII", "MIG", "Eotaxin", "TRAIL", "MDC", "MIF", "HGF")) %>% 
+  group_by(Metabolite) ,variable = "Value", grouping_variable = "Outcome")
+
+png("../Figures_Luminex/BOX/Set_1.png", height=12, width=12, units="in", res=600)
+
+Plot  %>% filter(Metabolite %in% c("LAG3", "TNFA", "IL4", "MIP3A", "GCSF", "CD80", "MCP1", "TIM3", 
+"ITAC", "sCD40L", "IL5", "IL18", "Eotaxin3", "IFNAlpha", "IL22", 
+"IL12p70", "SDF1A", "VEGFA", "IL23", "IL1Alpha", "IL21", "IL6", 
+"IL3", "CXCL13", "IL16", "IL31", "MIP1A", "IL15", "IL1Beta", 
+"IDO", "TNFRII", "MIG", "Eotaxin", "TRAIL", "MDC", "MIF", "HGF")) %>% 
+  ggplot(aes(x = Outcome, y = Value)) +
+        geom_boxplot(outlier.colour = NA, col = "grey50", alpha = 0.7) +
+  geom_jitter(position = jitter_0, shape=21,color="black",size = 2, alpha = 0.5,    aes(color=Response,fill=Response))+
+  #geom_vline(xintercept = c(2.5),col="black", lwd = 0.5, linetype="dashed", alpha=1)+
+  scale_color_manual(values = c(cols.Response.assign))+
+  scale_fill_manual(values = c(cols.Response.assign))+
+  # stat_pvalue_manual(Tukey.Res,  label = "p.adj", tip.length = 0,
+  #                    vjust = 0.01,
+  #                    size=3,
+  #                    hide.ns = FALSE) +
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  theme_bw() +
+  facet_wrap(~Metabolite, scales = "free", nrow = 5,
+             labeller = label_wrap_gen(width = 10, multi_line = TRUE)) +
+  labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/0.8,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+
+
+png("../Figures_Luminex/BOX/lgened.png", height=4, width=4, units="in", res=600)
+
+Plot  %>% filter(Metabolite %in% c("LAG3",  "HGF")) %>% 
+  ggplot(aes(x = Outcome, y = Value)) +
+        geom_boxplot(outlier.colour = NA, col = "grey50", alpha = 0.7) +
+  geom_jitter(position = jitter_0, shape=21,color="black",size = 2, alpha = 0.75,    aes(color=Response,fill=Response))+
+  #geom_vline(xintercept = c(2.5),col="black", lwd = 0.5, linetype="dashed", alpha=1)+
+  scale_color_manual(values = c(cols.Response.assign))+
+  scale_fill_manual(values = c(cols.Response.assign))+
+  # stat_pvalue_manual(Tukey.Res,  label = "p.adj", tip.length = 0,
+  #                    vjust = 0.01,
+  #                    size=3,
+  #                    hide.ns = FALSE) +
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  theme_bw() +
+  facet_wrap(~Metabolite, scales = "free", nrow = 5,
+             labeller = label_wrap_gen(width = 10, multi_line = TRUE)) +
+  labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/0.8,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank()) +theme(legend.key.size = unit(0.25, 'cm'))
+dev.off()
+```
+
+
+
+

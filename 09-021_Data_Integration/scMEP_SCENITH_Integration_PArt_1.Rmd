@@ -1,0 +1,196 @@
+---
+title: "scMEP_SCENITH_Integration"
+author: "Juraj Adamik"
+date: '2022-09-13'
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+# load functions library
+```{r, echo=TRUE, include=FALSE}
+library(easypackages)
+packages(c("dplyr", "broom",  "ggrepel","flowCore", "pheatmap","xlsx",
+           "tidyverse", "patchwork", "broom", "effsize","fst","ggplot2","gdata","rstatix","limma",
+           "doBy","reshape2","devtools","scico","readr","magrittr","uwot","readxl","ggridges",
+           "ggbeeswarm","viridis","RColorBrewer", "lme4","ComplexHeatmap","gridBase","circlize","dendextend","heatmaply","ggpubr","corrr", "survminer", "survival", "rstatix"))
+library(limma)
+library(ggrepel)
+library(umap)
+
+make_tukey_test <- function (data,variable,grouping_variable){
+  data %>%
+    tukey_hsd(reformulate(grouping_variable, variable)) %>%
+    add_y_position()
+}
+```
+
+# Read in data frames
+```{r}
+glimpse(SCENITH_mDC_Median)
+SCENITH_mDC_Median <-  read_csv("./09-021_SC_mDC_Tables/Immune_Metab_DF.Tcell.csv")
+SCENITH_mDC_Median %<>% select(Patient_Info,Glucose_Dep:CD8_CD4_COMBO)
+
+scMEP_Median <-  read_csv("./JACyTOF3_Tables/JACYTOF3_expr_median_table.csv")
+
+Viabl_Lct_Gluc <-  read_excel("./Viability_Gluc_Lact_Tables/Patient Lactate and Glucose levels1.xlsx", sheet = 1)
+```
+
+# scMEP_VLG_SCENITH
+Viabl_Lct_Gluc Wrangling with scMEP_Median and SCENITH_mDC_Median
+```{r}
+Viabl_Lct_Gluc %<>% mutate_at(vars(Glucose_1:Lactate_2), ~ as.numeric(.)) %>%
+  mutate_if(is.character, as.factor)
+
+Viabl_Lct_Gluc %<>%  
+  mutate(Lactate = ((Lactate_1+Lactate_2)/2)/Count*1000000,
+                          Glucose = ((Glucose_1+Glucose_2+Glucose_3)/3)/Count*1000000) %>%
+  mutate(Patient_Info = case_when(
+  grepl('^[0-9]',`Patient_Number`) ~ paste0("Pt_", Patient_Number),
+  grepl("HD",Patient_Number) ~ paste0("", Patient_Number))) %>% 
+  mutate(Patient_Info_DC = paste(Patient_Info, DC_Type, sep = "_")) %>% 
+  select(Patient_Info_DC,Patient_Info,Patient_Number:CPL_Code,Lactate,Glucose)
+
+scMEP_Median %<>%  
+  mutate(Patient_Info = case_when(
+  grepl('^[0-9]',Sequence_Number) ~ paste0("Pt_", Sequence_Number),
+  grepl("HD",Patient_CPL_Code) ~ paste0("", Patient_CPL_Code))) %>% 
+  mutate(Patient_Info_DC = paste(Patient_Info, DC, sep = "_")) %>% 
+  select(Patient_Info_DC,Patient_Info,DC:PFS_ind)
+
+setdiff(Viabl_Lct_Gluc$Patient_Info_DC,scMEP_Median$Patient_Info_DC)
+
+scMEP_VLG <- Viabl_Lct_Gluc %>% left_join(scMEP_Median %>% select(Patient_Info_DC,Patient_CPL_Code,CytC:PFS_ind),by = "Patient_Info_DC")
+scMEP_VLG$Patient_CPL_Code
+
+SCENITH_mDC_Median %<>% add_column("DC" = "mDC")
+SCENITH_mDC_Median %<>%  mutate(Patient_Info_DC = paste(Patient_Info, DC, sep = "_")) %>% 
+  select(Patient_Info_DC,Glucose_Dep:CD8_CD4_COMBO)
+
+SCENITH_mDC_Median %>% glimpse()
+scMEP_VLG_SCENITH <- scMEP_VLG %>% left_join(SCENITH_mDC_Median %>% select(Patient_Info_DC:Glnlysis_Dep, Bulk_Response_Per_Patient:CD8_CD4_COMBO) ,by = "Patient_Info_DC") 
+```
+
+#Set levels
+```{r}
+scMEP_VLG_SCENITH$Response <- factor(scMEP_VLG_SCENITH$Response, levels=c("HD","PR","SD","NED1","NED2","PD"))
+scMEP_VLG_SCENITH$Outcome <- factor(scMEP_VLG_SCENITH$Outcome, levels=c("HD","Good","Bad"))
+scMEP_VLG_SCENITH$Outcome.1 <- factor(scMEP_VLG_SCENITH$Outcome.1, levels=c("HD","Good","Stable","Bad"))
+scMEP_VLG_SCENITH$CD8_Resp_Per_Patient <- factor(scMEP_VLG_SCENITH$CD8_Resp_Per_Patient, levels=c("No","Yes"))
+scMEP_VLG_SCENITH$CD4_Resp_Per_Patient <- factor(scMEP_VLG_SCENITH$CD4_Resp_Per_Patient, levels=c("No","Yes"))
+scMEP_VLG_SCENITH$CD8.CD4_Resp_Per_Patient <- factor(scMEP_VLG_SCENITH$CD8.CD4_Resp_Per_Patient, levels=c("No","Yes", "NA"))
+
+```
+# Set Colors
+```{r}
+cols.Response = c("magenta","red","green","lightblue","blue","grey45")
+cols.Response.assign <- setNames(cols.Response, levels(scMEP_VLG_SCENITH$Response))
+
+cols.Outcome = c("magenta","red","grey45")
+cols.Outcome.assign <- setNames(cols.Outcome, levels(scMEP_VLG_SCENITH$Outcome))
+
+cols.Outcome.1 = c("magenta","red","green","grey45")
+cols.Outcome.1.assign <- setNames(cols.Outcome.1, levels(scMEP_VLG_SCENITH$Outcome.1))
+
+cols.T_cell = c("grey45","tomato", "black")
+cols.T_cell.assign <- setNames(cols.T_cell, levels(scMEP_VLG_SCENITH$CD8.CD4_Resp_Per_Patient))
+```
+# Set jitter
+```{r}
+jitter_none <- position_jitter(width = 0, height = 0)
+```
+
+# ------------------------------
+
+```{r}
+glimpse(scMEP_VLG_SC_Seahorse)
+TLN_SC_Parameters <- scMEP_VLG_SC_Seahorse %>%  select(TLN_Glucose_Dep:TLN_Glutaminolysis_Dep) %>% colnames()
+
+```
+
+# TLN Correlations Set 1
+```{r}
+TLNA_Parameters <- scMEP_VLG_SC_Seahorse %>% mutate_at(vars(TLN_SC_Parameters), ~ normalize(.)) %>% 
+  gather(Metabolism, Measure , all_of(TLN_SC_Parameters))
+
+scMEP_VLG_SC_Seahorse_scMEP_Marks <- scMEP_VLG_SC_Seahorse %>% gather(scMEP_marker, Measure ,CytC:CD1c)
+B_Parameters <- scMEP_VLG_SC_Seahorse %>% mutate_at(vars(Seahorse_OXPHOS,Seahorse_FAO,Seahorse_Glycolysis), ~ normalize(.)) %>% 
+  gather(Metabolism, Measure , all_of(Seahorse_OXPHOS),all_of(Seahorse_FAO),all_of(Seahorse_Glycolysis))
+
+C_Parameters <- scMEP_VLG_SC_Seahorse %>% mutate_at(vars(CytC:CD163), ~ normalize(.)) %>% 
+  gather(Metabolism, Measure , CytC:Puromycin)
+```
+
+
+# GLUCOSE + LACTATE
+# # Lactate & Glucose SCENITH correlations
+```{r}
+png("../Figures_Inegration/Seahorse_SCENITH_Lactate.png", height=2, width=20, units="in", res=600)
+TLNA_Parameters %>% filter(DC_Type == "mDC") %>% 
+    ggplot(aes(x = normalize(Lactate), Measure)) +
+  geom_jitter(aes(color = Response),position = jitter_none, size = 2, alpha = 0.75)+
+     geom_smooth(method = "lm", se=T, color = "black", alpha= 0.25) +
+  stat_cor(method = "spearman", label.x = 0, label.y = 1, size=3)+
+    scale_color_manual(values = c(cols.Response.assign))+
+        scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  theme_bw() + xlab("Lactate") + ylab("SCENITH Parameters")+
+  facet_wrap(~Metabolism, scales = "free", nrow = 1)+
+        labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/1,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+
+png("../Figures_Inegration/Seahorse_SCENITH_Glucose.png", height=2, width=20, units="in", res=600)
+TLNA_Parameters %>% filter(DC_Type == "mDC") %>% 
+    ggplot(aes(x = normalize(Glucose), Measure)) +
+  geom_jitter(aes(color = Response),position = jitter_none, size = 2, alpha = 0.75)+
+     geom_smooth(method = "lm", se=T, color = "black", alpha= 0.25) +
+  stat_cor(method = "spearman", label.x = 0, label.y = 1, size=3)+
+    scale_color_manual(values = c(cols.Response.assign))+
+        scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  theme_bw() + xlab("Glucose") + ylab("SCENITH Parameters")+
+  facet_wrap(~Metabolism, scales = "free", nrow = 1)+
+        labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/1,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+```
+
+
+
+#1. Glucose Lactate Corr
+Normalized Correlation analysis
+```{r}
+png("../Figures_Inegration/Corr_Lactate.vs.Glucose.png", height=5, width=5, units="in", res=600)
+scMEP_VLG_SC_Seahorse %>% 
+  ggplot(aes(x = normalize(Lactate), y = normalize(Glucose))) +
+  geom_jitter(aes(color = Response),position = jitter_none, size = 2, alpha = 0.75)+
+     geom_smooth(method = "lm", se=T, color = "black", alpha= 0.25) +
+  stat_cor(method = "spearman", label.x = 0.1, label.y = 1.1, size=3)+
+    scale_color_manual(values = c(cols.Response.assign))+
+        scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  theme_bw() + xlab("Lactate") + ylab("Glucose")+
+  facet_wrap(~DC_Type, scales = "free", nrow = 1)+
+        labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/1,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+```
+
+
+
+
+
+

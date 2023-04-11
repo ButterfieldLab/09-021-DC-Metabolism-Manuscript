@@ -1,0 +1,1908 @@
+---
+title: "09-021_Seahorse_Analysis"
+author: "Juraj Adamik"
+date: '2022-09-13'
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+# Load Libraries
+```{r}
+library(data.table)
+library(magrittr) # for %<>% function
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+library(stringr)
+#source("/R_work/R_functions.r")
+library(readxl)
+library(viridis)
+library(data.table)
+library(janitor)
+library(ggpubr)
+library(ComplexHeatmap)
+library(circlize) 
+library(rstatix)
+library(gridBase)
+library(randomcoloR)
+library(RColorBrewer)
+library(tidytext)
+library(cowplot)
+library(reshape2)
+library(vegan)
+library(ggrepel)
+
+library(survival)
+library(ranger)
+library(ggfortify)
+library(survminer)
+replace_factor_na <- function(x){
+  x <- as.character(x)
+  x <- if_else(is.na(x), "HD", x)
+  x <- as.factor(x)
+}
+
+make_tukey_test <- function (data,variable,grouping_variable){
+  data %>%
+    tukey_hsd(reformulate(grouping_variable, variable)) %>%
+    add_y_position()
+}
+```
+
+#1. OCR Ctrl + Palmitate
+```{r}
+OCR_data <- read_csv("./Seahorse_Data_Frames/OCR_Data_Pt_HD_091422.csv")
+OCR_data %<>% dplyr::mutate_if(is.character, as.factor)
+
+OCR_data$Inhibitor_Stage <-   factor(OCR_data$Inhibitor_Stage, levels=c("Basal","OLIGO","FCCP","2DG","Rot_Anti")) 
+
+OCR_data %>% gather(Donor, Seahorse, `3`:`HD 8974`) %>% filter(Treatment == "CTRL") %>% 
+  ggplot(aes(x = `Time (minutes)`, y = Seahorse)) +
+  geom_jitter(aes(color = Donor),position = jitter_none, size = 2, alpha = 0.5)+
+  geom_line(aes(group=Donor))+
+  facet_wrap(~DC_Type, nrow= 2)
+
+OCR.data.CTRL <- OCR_data %>% 
+  gather(Donor, Seahorse, `3`:`HD 8974`) %>% filter(Treatment == "CTRL") %>% 
+  group_by(Treatment,Inhibitor_Stage,DC_Type,Donor) %>% 
+  dplyr::summarise(across(where(is.numeric), ~ mean(.x, na.rm = TRUE))) %>% ungroup() %>% 
+  pivot_wider(names_from = Inhibitor_Stage, values_from = Seahorse) %>%  select(-`Time (minutes)`) %>% 
+  group_by(DC_Type,Donor) %>% 
+  summarise(across(c(Basal:Rot_Anti), ~max(.x, na.rm = TRUE))) %>% 
+  mutate(`Basal respiration` = Basal-Rot_Anti) %>%
+  mutate(`ATP-linked respiration` = Basal-OLIGO) %>% 
+  mutate(`Maximal oxygen consumption` = FCCP-Rot_Anti) %>% 
+  mutate(`Spare respiratory capacity` = FCCP-Basal) %>% 
+  mutate(`Proton leak` = OLIGO-Rot_Anti) %>% 
+  mutate_all(~ifelse(is.nan(.), NA, .)) %>%   # recode any infinite values to NA
+  mutate_all(~ifelse(is.infinite(.), NA, .)) %>%     # recode any infinite values to NA
+  ungroup() %>% 
+  mutate(Pt_DC = paste(Donor,DC_Type, sep = "_"), .before=DC_Type)
+
+OCR.data.Palmitate <- OCR_data %>% 
+  gather(Donor, Seahorse, `3`:`HD 8974`) %>% filter(Treatment == "Palmitate") %>% 
+  group_by(Treatment,Inhibitor_Stage,DC_Type,Donor) %>% 
+  dplyr::summarise(across(where(is.numeric), ~ mean(.x, na.rm = TRUE))) %>% 
+  pivot_wider(names_from = Inhibitor_Stage, values_from = Seahorse) %>%  select(-`Time (minutes)`) %>% 
+  group_by(DC_Type,Donor) %>% 
+  summarise(across(c(Basal:Rot_Anti), ~max(.x, na.rm = TRUE))) %>% 
+  mutate(`Basal respiration` = Basal-Rot_Anti) %>%
+  mutate(`ATP-linked respiration` = Basal-OLIGO) %>% 
+  mutate(`Maximal oxygen consumption` = FCCP-Rot_Anti) %>% 
+  mutate(`Spare respiratory capacity` = FCCP-Basal) %>% 
+  mutate(`Proton leak` = OLIGO-Rot_Anti) %>% 
+  mutate_all(~ifelse(is.nan(.), NA, .)) %>%   # recode any infinite values to NA
+  mutate_all(~ifelse(is.infinite(.), NA, .)) %>%     # recode any infinite values to NA
+  rename_at(vars(`Basal respiration`:`Proton leak`), list( ~paste0(., ".Palm"))) %>% ungroup() %>% 
+  mutate(Pt_DC = paste(Donor,DC_Type, sep = "_"), .before=DC_Type)
+
+OCR.data.CTRL %<>% 
+    mutate(Patient_Info = case_when(
+  grepl('^[0-9]',`Donor`) ~ paste0("Pt_", Donor),
+  grepl("HD",Donor) ~ paste0("", Donor))) %>% 
+  mutate(Patient_Info_DC = paste(Patient_Info, DC_Type, sep = "_"), .before=Pt_DC)
+
+PALM_data <- cbind(OCR.data.CTRL %>% select(Pt_DC,DC_Type,Donor,`Basal respiration`,`Maximal oxygen consumption`),
+      OCR.data.Palmitate %>% select(`Basal respiration.Palm`,`Maximal oxygen consumption.Palm`)) %>% 
+  mutate(Basal_Exo_FA =  `Basal respiration.Palm` - `Basal respiration`,
+         Maximal_Exo_FA = `Maximal oxygen consumption.Palm` - `Maximal oxygen consumption`)
+PALM_data
+                                                                            
+PALM_data %<>% 
+    mutate(Patient_Info = case_when(
+  grepl('^[0-9]',`Donor`) ~ paste0("Pt_", Donor),
+  grepl("HD",Donor) ~ paste0("", Donor))) %>% 
+  mutate(Patient_Info_DC = paste(Patient_Info, DC_Type, sep = "_")) %>% 
+  select(Patient_Info_DC,Patient_Info,Donor,DC_Type,Basal_Exo_FA,Maximal_Exo_FA)                                                          
+                                                                                 
+OCR.data.CTRL %<>% left_join(PALM_data %>% select(Patient_Info_DC, Basal_Exo_FA, Maximal_Exo_FA), by = "Patient_Info_DC")
+OCR.data.CTRL %<>%  mutate_all(~ifelse(is.nan(.), NA, .))   # recode any infinite values to NA
+```
+
+#2. ECAR
+```{r}
+ECAR_data <- read_csv("./Seahorse_Data_Frames/ECAR_Data_Pt_HD_091422.csv")
+ECAR_data %<>% dplyr::mutate_if(is.character, as.factor)
+
+ECAR_data$Inhibitor_Stage <- factor(ECAR_data$Inhibitor_Stage, levels=c("Basal","OLIGO","2DG")) 
+
+# Plot the data in Seahorse Pattern
+ECAR_data %>% gather(Donor, Seahorse, `3`:`HD 8974`) %>% filter(Treatment == "CTRL") %>% 
+  ggplot(aes(x = `Time (minutes)`, y = Seahorse)) +
+  geom_jitter(aes(color = Donor),position = jitter_none, size = 2, alpha = 0.5)+
+  geom_line(aes(group=Donor))+
+  facet_wrap(~DC_Type, nrow= 2, scales = "free")
+
+ECAR_data %<>% 
+  gather(Donor, Seahorse, `3`:`HD 8974`) %>% filter(Treatment == "CTRL") %>% 
+  group_by(Inhibitor_Stage,DC_Type,Donor) %>% 
+  dplyr::summarise(across(where(is.numeric), ~ mean(.x, na.rm = TRUE))) %>% ungroup() %>% 
+  pivot_wider(names_from = Inhibitor_Stage, values_from = Seahorse) %>%  select(-`Time (minutes)`) %>% 
+  group_by(DC_Type,Donor) %>% 
+  summarise(across(c(Basal:`2DG`), ~max(.x, na.rm = TRUE))) %>%   
+  mutate_all(~ifelse(is.infinite(.), NA, .)) %>%   # recode any infinite values to NA
+  mutate(`Non-glycolytic acidification` = `2DG`) %>%
+  mutate(`Basal glycolysis` = Basal-`2DG`) %>%
+  mutate(`Glycolytic capacity` = OLIGO-`2DG`)  %>% ungroup()
+
+ECAR_data %<>% dplyr::mutate_if(is.character, as.factor)
+
+ECAR_data %<>% 
+    mutate(Patient_Info = case_when(
+  grepl('^[0-9]',`Donor`) ~ paste0("Pt_", Donor),
+  grepl("HD",Donor) ~ paste0("", Donor))) %>% 
+  mutate(Patient_Info_DC = paste(Patient_Info, DC_Type, sep = "_")) %>% 
+  select(Patient_Info_DC,DC_Type,`Non-glycolytic acidification`:`Glycolytic capacity`)
+```
+
+# 3.OCR+ECAR
+```{r}
+# load scMEP_VLG_SCENITH from scMEP_SCENITH_Integration_PArt_1.Rmd code
+Seahorse_DATA <- OCR.data.CTRL  %>% select(-DC_Type) %>% left_join(ECAR_data, by = "Patient_Info_DC")
+
+Seahorse_DATA$Patient_Info_DC
+
+glimpse(scMEP_VLG_SCENITH)
+
+scMEP_VLG_SC_Seahorse <- Seahorse_DATA %>% select(Patient_Info_DC,`Basal respiration`:`Glycolytic capacity`,-Patient_Info)  %>% 
+  full_join(scMEP_VLG_SCENITH ,by = "Patient_Info_DC") 
+
+scMEP_VLG_SC_Seahorse %>% glimpse()
+scMEP_VLG_SC_Seahorse %<>% mutate(DC_Type = case_when(
+  grepl('DC',DC_Type.x) ~ paste0("", DC_Type.x),
+  is.na(DC_Type.x) ~ paste0("", DC_Type.y))) %>% select(-DC_Type.x,-DC_Type.y)
+
+scMEP_VLG_SC_Seahorse %>%  filter(grepl("HD",Patient_Info_DC)) %>% pull(DC_Type)
+glimpse(scMEP_VLG_SC_Seahorse)
+# scMEP_VLG_SC_Seahorse %>%
+#   mutate(Outcome =   replace_factor_na(Outcome)),
+#          Outcome.1 = replace_factor_na(Outcome.1),
+#          Response = replace_factor_na(Response))
+
+scMEP_VLG_SC_Seahorse %<>%
+  mutate(Outcome = case_when(
+  grepl('HD',Patient_Info_DC) ~ paste0("HD"),
+  grepl('Pt_',Patient_Info_DC) ~ paste0("", Outcome))) %>% mutate(Outcome = as.factor(Outcome)) %>% 
+  mutate(Outcome.1 = case_when(
+  grepl('HD',Patient_Info_DC) ~ paste0("HD"),
+  grepl('Pt_',Patient_Info_DC) ~ paste0("", Outcome.1))) %>% mutate(Outcome.1 = as.factor(Outcome.1)) %>% 
+  mutate(Response = case_when(
+  grepl('HD',Patient_Info_DC) ~ paste0("HD"),
+  grepl('Pt_',Patient_Info_DC) ~ paste0("", Response))) %>% mutate(Response = as.factor(Response))
+
+scMEP_VLG_SC_Seahorse %<>% 
+      mutate(Patient_Info = case_when(
+  grepl('Pt_',`Patient_Info`) ~ paste0("", Patient_Info),
+  grepl('HD',`Patient_Info_DC`) ~ paste0("", Patient_Info_DC))) 
+
+
+glimpse(scMEP_VLG_SC_Seahorse)
+scMEP_VLG_SC_Seahorse %>% filter(grepl(pattern = "HD",Outcome)) %>% pull(Patient_Info_DC)
+```
+
+#Set levels
+```{r}
+scMEP_VLG_SC_Seahorse$Response <- factor(scMEP_VLG_SC_Seahorse$Response, levels=c("HD","PR","SD","NED1","NED2","PD"))
+scMEP_VLG_SC_Seahorse$Outcome <- factor(scMEP_VLG_SC_Seahorse$Outcome, levels=c("HD","Good","Bad"))
+scMEP_VLG_SC_Seahorse$Outcome.1 <- factor(scMEP_VLG_SC_Seahorse$Outcome.1, levels=c("HD","Good","Stable","Bad"))
+scMEP_VLG_SC_Seahorse$CD8_Resp_Per_Patient <- factor(scMEP_VLG_SC_Seahorse$CD8_Resp_Per_Patient, levels=c("No","Yes"))
+scMEP_VLG_SC_Seahorse$CD4_Resp_Per_Patient <- factor(scMEP_VLG_SC_Seahorse$CD4_Resp_Per_Patient, levels=c("No","Yes"))
+scMEP_VLG_SC_Seahorse$CD8.CD4_Resp_Per_Patient <- factor(scMEP_VLG_SC_Seahorse$CD8.CD4_Resp_Per_Patient, levels=c("No","Yes", "NA"))
+```
+# Set Colors
+```{r}
+cols.Response = c("magenta","red","green","lightblue","blue","grey45")
+cols.Response.assign <- setNames(cols.Response, levels(scMEP_VLG_SC_Seahorse$Response))
+
+cols.Outcome = c("magenta","red","grey45")
+cols.Outcome.assign <- setNames(cols.Outcome, levels(scMEP_VLG_SC_Seahorse$Outcome))
+
+cols.Outcome.1 = c("magenta","red","green","grey45")
+cols.Outcome.1.assign <- setNames(cols.Outcome.1, levels(scMEP_VLG_SC_Seahorse$Outcome.1))
+
+cols.T_cell = c("grey45","tomato", "black")
+cols.T_cell.assign <- setNames(cols.T_cell, levels(scMEP_VLG_SC_Seahorse$CD8.CD4_Resp_Per_Patient))
+```
+# Set jitter
+```{r}
+jitter_none <- position_jitter(width = 0, height = 0)
+jitter_0 <- position_jitter(width = 0.25, height = 0)
+jitter_1 <- position_jitter(width = 0.1, height = 0)
+```
+
+# Asses the distributions and filter outliars 
+```{r}
+# scMEP_VLG_SC_Seahorse  %>% gather(Metabolism, Measure , `Basal respiration`:`Glycolytic capacity`) %>% 
+#   filter(!is.na(Outcome.1)) %>% 
+#   ggplot(aes(x = Outcome.1, y = Measure)) +
+#         geom_boxplot(outlier.colour = NA, col = "grey50", alpha = 0.7) +
+#   geom_jitter(position = jitter_0, shape=21,color="black",size = 2, alpha = 0.5,    aes(color=Response,fill=Response))+
+#   facet_wrap(~DC_Type+Metabolism)
+
+scMEP_VLG_SC_Seahorse$Glucose_Dep[scMEP_VLG_SC_Seahorse$Glucose_Dep < 0] <- NA
+scMEP_VLG_SC_Seahorse$`Glycolytic capacity`[scMEP_VLG_SC_Seahorse$`Glycolytic capacity` > 200] <- NA
+scMEP_VLG_SC_Seahorse$Glucose[scMEP_VLG_SC_Seahorse$Glucose > 727.81] <- NA
+
+# scMEP_VLG_SC_Seahorse %>% gather(Metabolism, Measure ,`Basal respiration`:`Glycolytic capacity`) %>% 
+#   ggplot(aes(x = Patient_Info_DC, y = Measure)) +
+#   geom_jitter(aes(color = Response),position = jitter_none, size = 2, alpha = 0.5)+
+#     facet_wrap(~Metabolism, scales = "free")
+```
+
+```{r}
+ETC_TCA = c("CytC", "SDHA", "CS","ATP5A", "IDH2")
+FAO_AA = c("HADHA" ,"CD36",  "CPT1A","CD98",  "GLS",   "ASCT2")
+FAO = c("HADHA" ,"CD36",  "CPT1A")
+AA = c("CD98",  "GLS",   "ASCT2")
+GLYC = c("GAPDH",  "ENO1", "Glut1",   "HK2",  "MCT1")
+MITO_PPP = c("TOMM20", "PGC1a","G6PD", "GSS")
+SIGNAL = c("XBP1",  "ATF4")
+DNARNAPROT = c("IdU","Puromycin","BrU")
+```
+
+# define metabolic parameter sets
+```{r}
+Seahorse_OXPHOS <- c("Basal respiration", "ATP-linked respiration", "Maximal oxygen consumption", "Spare respiratory capacity", "Proton leak")
+Seahorse_Glycolysis <- c("Non-glycolytic acidification","Basal glycolysis","Glycolytic capacity")
+Seahorse_FAO <- c("Basal_Exo_FA","Maximal_Exo_FA")
+SCENITH_Parameters <- scMEP_VLG_SC_Seahorse %>%  select(Glucose_Dep:Glnlysis_Dep) %>% colnames()
+```
+
+# Correlations Set 1
+```{r}
+A_Parameters <- scMEP_VLG_SC_Seahorse %>% mutate_at(vars(SCENITH_Parameters), ~ normalize(.)) %>% 
+  gather(Metabolism, Measure , all_of(SCENITH_Parameters))
+scMEP_VLG_SC_Seahorse_scMEP_Marks <- scMEP_VLG_SC_Seahorse %>% gather(scMEP_marker, Measure ,CytC:CD1c)
+B_Parameters <- scMEP_VLG_SC_Seahorse %>% mutate_at(vars(Seahorse_OXPHOS,Seahorse_FAO,Seahorse_Glycolysis), ~ normalize(.)) %>% 
+  gather(Metabolism, Measure , all_of(Seahorse_OXPHOS),all_of(Seahorse_FAO),all_of(Seahorse_Glycolysis))
+
+C_Parameters <- scMEP_VLG_SC_Seahorse %>% mutate_at(vars(CytC:CD163), ~ normalize(.)) %>% 
+  gather(Metabolism, Measure , CytC:Puromycin)
+```
+
+# ------------------------------
+# FIGURES
+# ----------------------------
+# ----------------------------
+# GLUCOSE + LACTATE
+# # Lactate & Glucose SCENITH correlations
+```{r}
+png("../Figures_Inegration/Seahorse_SCENITH_Lactate.png", height=2, width=20, units="in", res=600)
+A_Parameters %>% filter(DC_Type == "mDC") %>% 
+    ggplot(aes(x = normalize(Lactate), Measure)) +
+  geom_jitter(aes(color = Response),position = jitter_none, size = 2, alpha = 0.75)+
+     geom_smooth(method = "lm", se=T, color = "black", alpha= 0.25) +
+  stat_cor(method = "spearman", label.x = 0, label.y = 1, size=3)+
+    scale_color_manual(values = c(cols.Response.assign))+
+        scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  theme_bw() + xlab("Lactate") + ylab("SCENITH Parameters")+
+  facet_wrap(~Metabolism, scales = "free", nrow = 1)+
+        labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/1,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+
+png("../Figures_Inegration/Seahorse_SCENITH_Glucose.png", height=2, width=20, units="in", res=600)
+A_Parameters %>% filter(DC_Type == "mDC") %>% 
+    ggplot(aes(x = normalize(Glucose), Measure)) +
+  geom_jitter(aes(color = Response),position = jitter_none, size = 2, alpha = 0.75)+
+     geom_smooth(method = "lm", se=T, color = "black", alpha= 0.25) +
+  stat_cor(method = "spearman", label.x = 0, label.y = 1, size=3)+
+    scale_color_manual(values = c(cols.Response.assign))+
+        scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  theme_bw() + xlab("Glucose") + ylab("SCENITH Parameters")+
+  facet_wrap(~Metabolism, scales = "free", nrow = 1)+
+        labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/1,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+```
+
+# # Lactate & Glucose Seahorse correlations
+```{r}
+png("../Figures_Inegration/Seahorse_Glucose.png", height=2.25, width=20, units="in", res=600)
+B_Parameters %>% 
+    ggplot(aes(x = normalize(Glucose), Measure)) +
+  geom_jitter(aes(color = Response),position = jitter_none, size = 2, alpha = 0.75)+
+     geom_smooth(method = "lm", se=T, color = "black", alpha= 0.25) +
+  stat_cor(method = "spearman", label.x = 0, label.y = 1, size=3)+
+  xlim(0, 0.5)+
+    scale_color_manual(values = c(cols.Response.assign))+
+        scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  theme_bw() + xlab("Glucose") + ylab("Seahorse")+
+  facet_wrap(~Metabolism, scales = "free", nrow = 1,
+               labeller = label_wrap_gen(width = 10, multi_line = TRUE))+
+        labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/1,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+
+png("../Figures_Inegration/Seahorse_Lactate.png", height=2.25, width=20, units="in", res=600)
+B_Parameters %>% 
+    ggplot(aes(x = normalize(Lactate), Measure)) +
+  geom_jitter(aes(color = Response),position = jitter_none, size = 2, alpha = 0.75)+
+     geom_smooth(method = "lm", se=T, color = "black", alpha= 0.25) +
+  stat_cor(method = "spearman", label.x = 0, label.y = 1, size=3)+
+    scale_color_manual(values = c(cols.Response.assign))+
+        scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  theme_bw() + xlab("Lactate") + ylab("Seahorse")+
+  facet_wrap(~Metabolism, scales = "free", nrow = 1,
+             labeller = label_wrap_gen(width = 10, multi_line = TRUE))+
+        labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/1,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+############################
+```
+
+# Lactate & Glucose scMEP correlations
+```{r}
+############################
+png("../Figures_Inegration/Lactate_scMEP_ETC_TCA.png", height=2, width=20, units="in", res=600)
+scMEP_VLG_SC_Seahorse_scMEP_Marks %>% 
+  filter(scMEP_marker %in% c(ETC_TCA)) %>% 
+    ggplot(aes(x = normalize(Lactate), Measure)) +
+  geom_jitter(aes(color = Response),position = jitter_none, size = 2, alpha = 0.75)+
+     geom_smooth(method = "lm", se=T, color = "black", alpha= 0.25) +
+  stat_cor(method = "spearman", label.x = 0, label.y = 1, size=3)+
+    scale_color_manual(values = c(cols.Response.assign))+
+        scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  theme_bw() + xlab("Lactate") + ylab("scMEP ETC_TCA")+
+  facet_wrap(~scMEP_marker, scales = "free", nrow = 1)+
+        labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/1,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+
+
+png("../Figures_Inegration/Glucose_scMEP_ETC_TCA.png", height=2, width=20, units="in", res=600)
+scMEP_VLG_SC_Seahorse_scMEP_Marks %>% filter(Glucose < 727.81) %>%  # filter outliar glucose sample
+  filter(scMEP_marker %in% c(ETC_TCA)) %>% 
+    ggplot(aes(x = (Glucose), Measure)) +
+  geom_jitter(aes(color = Response),position = jitter_none, size = 2, alpha = 0.75)+
+     geom_smooth(method = "lm", se=T, color = "black", alpha= 0.25) +
+  stat_cor(method = "spearman", label.x = 0, label.y = 1, size=3)+
+    scale_color_manual(values = c(cols.Response.assign))+
+        scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  theme_bw() + xlab("Glucose") + ylab("scMEP ETC_TCA")+
+  facet_wrap(~scMEP_marker, scales = "free", nrow = 1)+
+        labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/1,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+
+#################
+png("../Figures_Inegration/Lactate_scMEP_GLYC_mDC.png", height=2, width=20, units="in", res=600)
+scMEP_VLG_SC_Seahorse_scMEP_Marks %>% 
+  filter(scMEP_marker %in% c(GLYC)) %>% filter(DC_Type == "mDC") %>% 
+    ggplot(aes(x = normalize(Lactate), Measure)) +
+  geom_jitter(aes(color = Response),position = jitter_none, size = 2, alpha = 0.75)+
+     geom_smooth(method = "lm", se=T, color = "black", alpha= 0.25) +
+  stat_cor(method = "spearman", label.x = 0, label.y = 1, size=3)+
+    scale_color_manual(values = c(cols.Response.assign))+
+        scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  theme_bw() + xlab("Lactate") + ylab("scMEP GLYC")+
+  facet_wrap(~scMEP_marker, scales = "free", nrow = 1)+
+        labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/1,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+
+png("../Figures_Inegration/Glucose_scMEP_GLYC_iDC.png", height=2, width=20, units="in", res=600)
+scMEP_VLG_SC_Seahorse_scMEP_Marks %>% filter(Glucose < 727.81) %>% filter(DC_Type == "iDC") %>% 
+  filter(scMEP_marker %in% c(GLYC)) %>%
+    ggplot(aes(x = normalize(Glucose), Measure)) +
+  geom_jitter(aes(color = Response),position = jitter_none, size = 2, alpha = 0.75)+
+     geom_smooth(method = "lm", se=T, color = "black", alpha= 0.25) +
+  stat_cor(method = "spearman", label.x = 0, label.y = 1, size=3)+
+    scale_color_manual(values = c(cols.Response.assign))+
+        scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  theme_bw() + xlab("Glucose") + ylab("scMEP GLYC")+
+  facet_wrap(~scMEP_marker, scales = "free", nrow = 1)+
+        labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/1,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+#################
+png("../Figures_Inegration/Lactate_scMEP_FAO_AA.png", height=2, width=20, units="in", res=600)
+scMEP_VLG_SC_Seahorse_scMEP_Marks %>% 
+  filter(scMEP_marker %in% c(FAO_AA)) %>% 
+    ggplot(aes(x = normalize(Lactate), Measure)) +
+  geom_jitter(aes(color = Response),position = jitter_none, size = 2, alpha = 0.75)+
+     geom_smooth(method = "lm", se=T, color = "black", alpha= 0.25) +
+  stat_cor(method = "spearman", label.x = 0, label.y = 1, size=3)+
+    scale_color_manual(values = c(cols.Response.assign))+
+        scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  theme_bw() + xlab("Lactate") + ylab("scMEP FAO_AA")+
+  facet_wrap(~scMEP_marker, scales = "free", nrow = 1)+
+        labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/1,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+
+png("../Figures_Inegration/Glucose_scMEP_FAO_AA.png", height=2, width=20, units="in", res=600)
+scMEP_VLG_SC_Seahorse_scMEP_Marks %>% filter(Glucose < 727.81) %>% 
+  filter(scMEP_marker %in% c(FAO_AA)) %>% 
+    ggplot(aes(x = normalize(Glucose), Measure)) +
+  geom_jitter(aes(color = Response),position = jitter_none, size = 2, alpha = 0.75)+
+     geom_smooth(method = "lm", se=T, color = "black", alpha= 0.25) +
+  stat_cor(method = "spearman", label.x = 0, label.y = 1, size=3)+
+    scale_color_manual(values = c(cols.Response.assign))+
+        scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  theme_bw() + xlab("Glucose") + ylab("scMEP FAO_AA")+
+  facet_wrap(~scMEP_marker, scales = "free", nrow = 1)+
+        labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/1,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+#################
+png("../Figures_Inegration/Lactate_scMEP_MITO_PPP.png", height=2, width=20, units="in", res=600)
+scMEP_VLG_SC_Seahorse_scMEP_Marks %>% 
+  filter(scMEP_marker %in% c(MITO_PPP)) %>% 
+    ggplot(aes(x = normalize(Lactate), Measure)) +
+  geom_jitter(aes(color = Response),position = jitter_none, size = 2, alpha = 0.75)+
+     geom_smooth(method = "lm", se=T, color = "black", alpha= 0.25) +
+  stat_cor(method = "spearman", label.x = 0, label.y = 1, size=3)+
+    scale_color_manual(values = c(cols.Response.assign))+
+        scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  theme_bw() + xlab("Lactate") + ylab("scMEP MITO_PPP")+
+  facet_wrap(~scMEP_marker, scales = "free", nrow = 1)+
+        labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/1,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+
+png("../Figures_Inegration/Glucose_scMEP_MITO_PPP.png", height=2, width=20, units="in", res=600)
+scMEP_VLG_SC_Seahorse_scMEP_Marks %>% filter(Glucose < 727.81) %>% 
+  filter(scMEP_marker %in% c(MITO_PPP)) %>% 
+    ggplot(aes(x = normalize(Glucose), Measure)) +
+  geom_jitter(aes(color = Response),position = jitter_none, size = 2, alpha = 0.75)+
+     geom_smooth(method = "lm", se=T, color = "black", alpha= 0.25) +
+  stat_cor(method = "spearman", label.x = 0, label.y = 1, size=3)+
+    scale_color_manual(values = c(cols.Response.assign))+
+        scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  theme_bw() + xlab("Glucose") + ylab("scMEP MITO_PPP")+
+  facet_wrap(~scMEP_marker, scales = "free", nrow = 1)+
+        labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/1,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+#################
+```
+# ----------------------------
+# ----------------------------
+# GLUCOSE + LACTATE
+# Set of BOX plots
+```{r}
+stat.test.G <- scMEP_VLG_SC_Seahorse %>% 
+  group_by(DC_Type) %>%
+  t_test(Glucose ~  Outcome, ref.group = "HD") %>% add_y_position()
+
+png("../Figures_Inegration/BOX/Glucose.Ref.png", height=2.5, width=5, units="in", res=600)
+scMEP_VLG_SC_Seahorse %>% 
+  filter(!is.na(Outcome)) %>% 
+  ggplot(aes(x = Outcome, y = Glucose)) +
+        geom_boxplot(outlier.colour = NA, col = "grey50", alpha = 0.7) +
+  geom_jitter(position = jitter_0, shape=21,color="black",size = 2, alpha = 0.5,    aes(color=Response,fill=Response))+
+  #geom_vline(xintercept = c(2.5),col="black", lwd = 0.5, linetype="dashed", alpha=1)+
+  scale_color_manual(values = c(cols.Response.assign))+
+  scale_fill_manual(values = c(cols.Response.assign))+
+  stat_pvalue_manual(stat.test.G,  label = "p.adj", tip.length = 0,
+                     vjust = 0.01,   
+                     size=3.5,
+                     hide.ns = FALSE)+
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  theme_bw() +
+  facet_wrap(~DC_Type, scales = "free", nrow = 1,
+             labeller = label_wrap_gen(width = 10, multi_line = TRUE)) +
+  labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/0.8,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+################
+stat.test <- scMEP_VLG_SC_Seahorse %>% 
+  group_by(DC_Type) %>%
+  t_test(Lactate ~  Outcome, ref.group = "HD") %>% add_y_position()
+
+png("../Figures_Inegration/BOX/Lactate.Ref.png", height=2.5, width=5, units="in", res=600)
+scMEP_VLG_SC_Seahorse %>% 
+  filter(!is.na(Outcome)) %>% 
+  ggplot(aes(x = Outcome, y = Lactate)) +
+        geom_boxplot(outlier.colour = NA, col = "grey50", alpha = 0.7) +
+  geom_jitter(position = jitter_0, shape=21,color="black",size = 2, alpha = 0.5,    aes(color=Response,fill=Response))+
+  #geom_vline(xintercept = c(2.5),col="black", lwd = 0.5, linetype="dashed", alpha=1)+
+  scale_color_manual(values = c(cols.Response.assign))+
+  scale_fill_manual(values = c(cols.Response.assign))+
+  stat_pvalue_manual(stat.test,  label = "p.adj", tip.length = 0,
+                     vjust = 0.01,   #y.position = c(380,420,460),
+                     size=3.5,
+                     hide.ns = FALSE)+
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  theme_bw() +
+  facet_wrap(~DC_Type, scales = "free", nrow = 1,
+             labeller = label_wrap_gen(width = 10, multi_line = TRUE)) +
+  labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/0.8,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+
+################ ################ ################
+t_test <- scMEP_VLG_SC_Seahorse %>% 
+   filter(!is.na(Outcome)) %>% filter(Outcome != "HD") %>% 
+  group_by(DC_Type) %>% 
+  t_test(Glucose ~ Outcome) %>% add_y_position()
+
+png("../Figures_Inegration/BOX/Glucose.Good_Bad.png", height=2.5, width=5, units="in", res=600)
+scMEP_VLG_SC_Seahorse %>%  
+   filter(!is.na(Outcome)) %>% filter(Outcome != "HD") %>% 
+  ggplot(aes(x = Outcome, y = Glucose)) +
+        geom_boxplot(outlier.colour = NA, col = "grey50", alpha = 0.7) +
+  geom_jitter(position = jitter_0, shape=21,color="black",size = 2, alpha = 0.5,    aes(color=Response,fill=Response))+
+  #geom_vline(xintercept = c(2.5),col="black", lwd = 0.5, linetype="dashed", alpha=1)+
+  scale_color_manual(values = c(cols.Response.assign))+
+  scale_fill_manual(values = c(cols.Response.assign))+
+   stat_pvalue_manual(t_test,  label = "p", tip.length = 0,
+                     vjust = 0.01,   #y.position = c(380,420,460),
+                     size=3.5,
+                     hide.ns = FALSE)+
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  theme_bw() +
+  facet_wrap(~DC_Type, scales = "free", nrow = 1,
+             labeller = label_wrap_gen(width = 10, multi_line = TRUE)) +
+  labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/0.8,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+
+t_test <- scMEP_VLG_SC_Seahorse %>% 
+   filter(!is.na(Outcome)) %>% filter(Outcome != "HD") %>% 
+  group_by(DC_Type) %>% 
+  t_test(Lactate ~ Outcome) %>% add_y_position()
+
+png("../Figures_Inegration/BOX/Lactate.Good_Bad.png", height=2.5, width=5, units="in", res=600)
+scMEP_VLG_SC_Seahorse %>%  
+   filter(!is.na(Outcome)) %>% filter(Outcome != "HD") %>% 
+  ggplot(aes(x = Outcome, y = Lactate)) +
+        geom_boxplot(outlier.colour = NA, col = "grey50", alpha = 0.7) +
+  geom_jitter(position = jitter_0, shape=21,color="black",size = 2, alpha = 0.5,    aes(color=Response,fill=Response))+
+  #geom_vline(xintercept = c(2.5),col="black", lwd = 0.5, linetype="dashed", alpha=1)+
+  scale_color_manual(values = c(cols.Response.assign))+
+  scale_fill_manual(values = c(cols.Response.assign))+
+   stat_pvalue_manual(t_test,  label = "p", tip.length = 0,
+                     vjust = 0.01,   #y.position = c(380,420,460),
+                     size=3.5,
+                     hide.ns = FALSE)+
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  theme_bw() +
+  facet_wrap(~DC_Type, scales = "free", nrow = 1,
+             labeller = label_wrap_gen(width = 10, multi_line = TRUE)) +
+  labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/0.8,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+```
+
+
+```{r}
+# CD8
+#####################
+t_test <-scMEP_VLG_SC_Seahorse %>% filter(DC_Type == "mDC") %>% 
+  filter(!is.na(CD8_Resp_Per_Patient)) %>% 
+  wilcox_test(Glucose ~ CD8_Resp_Per_Patient) %>% add_y_position()
+
+png("../Figures_Inegration/BOX/CD8.Glucose.png", height=2.5, width=3, units="in", res=600)
+scMEP_VLG_SC_Seahorse %>% filter(DC_Type == "mDC") %>% 
+  filter(!is.na(CD8_Resp_Per_Patient)) %>% 
+  ggplot(aes(x = CD8_Resp_Per_Patient, y = Glucose)) +
+        geom_boxplot(outlier.colour = NA, col = "grey50", alpha = 0.7) +
+  geom_jitter(position = jitter_0, shape=21,color="black",size = 2, alpha = 0.5,    aes(color=Response,fill=Response))+
+  #geom_vline(xintercept = c(2.5),col="black", lwd = 0.5, linetype="dashed", alpha=1)+
+  scale_color_manual(values = c(cols.Response.assign))+
+  scale_fill_manual(values = c(cols.Response.assign))+
+   stat_pvalue_manual(t_test,  label = "p", tip.length = 0,
+                     vjust = 0.01,   #y.position = c(380,420,460),
+                     size=3.5,
+                     hide.ns = FALSE)+
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  theme_bw() +
+  facet_wrap(~DC_Type, scales = "free", nrow = 1,
+             labeller = label_wrap_gen(width = 10, multi_line = TRUE)) +
+  labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/0.8,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+
+D_Parameters %>% glimpse()
+t_test <-scMEP_VLG_SC_Seahorse %>% filter(DC_Type == "mDC") %>% 
+  filter(!is.na(CD8_Resp_Per_Patient)) %>% 
+  wilcox_test(Lactate ~ CD8_Resp_Per_Patient) %>% add_y_position()
+
+png("../Figures_Inegration/BOX/CD8.Lactate.png", height=2.5, width=3, units="in", res=600)
+scMEP_VLG_SC_Seahorse %>% filter(DC_Type == "mDC") %>% 
+  filter(!is.na(CD8_Resp_Per_Patient)) %>% 
+  ggplot(aes(x = CD8_Resp_Per_Patient, y = Lactate)) +
+        geom_boxplot(outlier.colour = NA, col = "grey50", alpha = 0.7) +
+  geom_jitter(position = jitter_0, shape=21,color="black",size = 2, alpha = 0.5,    aes(color=Response,fill=Response))+
+  #geom_vline(xintercept = c(2.5),col="black", lwd = 0.5, linetype="dashed", alpha=1)+
+  scale_color_manual(values = c(cols.Response.assign))+
+  scale_fill_manual(values = c(cols.Response.assign))+
+   stat_pvalue_manual(t_test,  label = "p", tip.length = 0,
+                     vjust = 0.01,   #y.position = c(380,420,460),
+                     size=3.5,
+                     hide.ns = FALSE)+
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  theme_bw() +
+  facet_wrap(~DC_Type, scales = "free", nrow = 1,
+             labeller = label_wrap_gen(width = 10, multi_line = TRUE)) +
+  labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/0.8,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+# CD4
+#####################
+t_test <-scMEP_VLG_SC_Seahorse %>% filter(DC_Type == "mDC") %>% 
+  filter(!is.na(CD8_Resp_Per_Patient)) %>% 
+  wilcox_test(Glucose ~ CD4_Resp_Per_Patient) %>% add_y_position()
+
+png("../Figures_Inegration/BOX/CD4.Glucose.png", height=2.5, width=3, units="in", res=600)
+scMEP_VLG_SC_Seahorse %>% filter(DC_Type == "mDC") %>% 
+  filter(!is.na(CD4_Resp_Per_Patient)) %>% 
+  ggplot(aes(x = CD4_Resp_Per_Patient, y = Glucose)) +
+        geom_boxplot(outlier.colour = NA, col = "grey50", alpha = 0.7) +
+  geom_jitter(position = jitter_0, shape=21,color="black",size = 2, alpha = 0.5,    aes(color=Response,fill=Response))+
+  #geom_vline(xintercept = c(2.5),col="black", lwd = 0.5, linetype="dashed", alpha=1)+
+  scale_color_manual(values = c(cols.Response.assign))+
+  scale_fill_manual(values = c(cols.Response.assign))+
+   stat_pvalue_manual(t_test,  label = "p", tip.length = 0,
+                     vjust = 0.01,   #y.position = c(380,420,460),
+                     size=3.5,
+                     hide.ns = FALSE)+
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  theme_bw() +
+  facet_wrap(~DC_Type, scales = "free", nrow = 1,
+             labeller = label_wrap_gen(width = 10, multi_line = TRUE)) +
+  labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/0.8,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+
+D_Parameters %>% glimpse()
+t_test <-scMEP_VLG_SC_Seahorse %>% filter(DC_Type == "mDC") %>% 
+  filter(!is.na(CD4_Resp_Per_Patient)) %>% 
+  wilcox_test(Lactate ~ CD4_Resp_Per_Patient) %>% add_y_position()
+
+png("../Figures_Inegration/BOX/CD4.Lactate.png", height=2.5, width=3, units="in", res=600)
+scMEP_VLG_SC_Seahorse %>% filter(DC_Type == "mDC") %>% 
+  filter(!is.na(CD4_Resp_Per_Patient)) %>% 
+  ggplot(aes(x = CD4_Resp_Per_Patient, y = Lactate)) +
+        geom_boxplot(outlier.colour = NA, col = "grey50", alpha = 0.7) +
+  geom_jitter(position = jitter_0, shape=21,color="black",size = 2, alpha = 0.5,    aes(color=Response,fill=Response))+
+  #geom_vline(xintercept = c(2.5),col="black", lwd = 0.5, linetype="dashed", alpha=1)+
+  scale_color_manual(values = c(cols.Response.assign))+
+  scale_fill_manual(values = c(cols.Response.assign))+
+   stat_pvalue_manual(t_test,  label = "p", tip.length = 0,
+                     vjust = 0.01,   #y.position = c(380,420,460),
+                     size=3.5,
+                     hide.ns = FALSE)+
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  theme_bw() +
+  facet_wrap(~DC_Type, scales = "free", nrow = 1,
+             labeller = label_wrap_gen(width = 10, multi_line = TRUE)) +
+  labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/0.8,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+# CD8+CD4
+#####################
+t_test <-scMEP_VLG_SC_Seahorse %>% filter(DC_Type == "mDC") %>% 
+  filter(!is.na(CD8.CD4_Resp_Per_Patient)) %>% 
+  wilcox_test(Glucose ~ CD8.CD4_Resp_Per_Patient) %>% add_y_position()
+
+png("../Figures_Inegration/BOX/CD8.CD4.Glucose.png", height=2.5, width=3, units="in", res=600)
+scMEP_VLG_SC_Seahorse %>% filter(DC_Type == "mDC") %>% 
+  filter(!is.na(CD8.CD4_Resp_Per_Patient)) %>% 
+  ggplot(aes(x = CD8.CD4_Resp_Per_Patient, y = Glucose)) +
+        geom_boxplot(outlier.colour = NA, col = "grey50", alpha = 0.7) +
+  geom_jitter(position = jitter_0, shape=21,color="black",size = 2, alpha = 0.5,    aes(color=Response,fill=Response))+
+  #geom_vline(xintercept = c(2.5),col="black", lwd = 0.5, linetype="dashed", alpha=1)+
+  scale_color_manual(values = c(cols.Response.assign))+
+  scale_fill_manual(values = c(cols.Response.assign))+
+   stat_pvalue_manual(t_test,  label = "p", tip.length = 0,
+                     vjust = 0.01,   #y.position = c(380,420,460),
+                     size=3.5,
+                     hide.ns = FALSE)+
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  theme_bw() +
+  facet_wrap(~DC_Type, scales = "free", nrow = 1,
+             labeller = label_wrap_gen(width = 10, multi_line = TRUE)) +
+  labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/0.8,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+
+D_Parameters %>% glimpse()
+t_test <-scMEP_VLG_SC_Seahorse %>% filter(DC_Type == "mDC") %>% 
+  filter(!is.na(CD8.CD4_Resp_Per_Patient)) %>% 
+  wilcox_test(Lactate ~ CD8.CD4_Resp_Per_Patient) %>% add_y_position()
+
+png("../Figures_Inegration/BOX/CD8.CD4.Lactate.png", height=2.5, width=3, units="in", res=600)
+scMEP_VLG_SC_Seahorse %>% filter(DC_Type == "mDC") %>% 
+  filter(!is.na(CD8.CD4_Resp_Per_Patient)) %>% 
+  ggplot(aes(x = CD8.CD4_Resp_Per_Patient, y = Lactate)) +
+        geom_boxplot(outlier.colour = NA, col = "grey50", alpha = 0.7) +
+  geom_jitter(position = jitter_0, shape=21,color="black",size = 2, alpha = 0.5,    aes(color=Response,fill=Response))+
+  #geom_vline(xintercept = c(2.5),col="black", lwd = 0.5, linetype="dashed", alpha=1)+
+  scale_color_manual(values = c(cols.Response.assign))+
+  scale_fill_manual(values = c(cols.Response.assign))+
+   stat_pvalue_manual(t_test,  label = "p", tip.length = 0,
+                     vjust = 0.01,   #y.position = c(380,420,460),
+                     size=3.5,
+                     hide.ns = FALSE)+
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  theme_bw() +
+  facet_wrap(~DC_Type, scales = "free", nrow = 1,
+             labeller = label_wrap_gen(width = 10, multi_line = TRUE)) +
+  labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/0.8,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+```
+
+
+
+### LR Outcome Binary 3
+```{r}
+scMEP_VLG_SC_Seahorse_Tidy.model <- scMEP_VLG_SC_Seahorse %>%  
+  mutate(Glucose = log10(Glucose),
+         Lactate = log10(Lactate)) %>% 
+  
+  gather(Metabolite, Measure, Glucose:Lactate) %>%  
+  mutate(Outcome.1_Rank = case_when(
+  Outcome %in% c("HD") ~ 3,
+  Outcome %in% c("Good") ~ 2,
+  Outcome %in% c("Bad") ~ 1
+))
+
+Pre.lm_full <- scMEP_VLG_SC_Seahorse_Tidy.model %>% nest(data=c(-DC_Type, -Metabolite)) %>%  
+  #filter(Cell.Type != "CD8:Treg Ratio") %>% 
+	mutate(
+		lm_out_full = map(data, ~lm(Outcome.1_Rank ~ Measure, data=.x %>% filter(!is.na(Outcome.1_Rank)) %>% mutate(Outcome.1_Rank=as.numeric(Outcome.1_Rank)))),
+		pval_full = map_dbl(lm_out_full, ~.x %>% broom::tidy() %>% filter(term=="Measure") %>% pull(p.value)),
+	)
+
+Pre.lm_full %>% select(-data, -lm_out_full) %>% arrange(pval_full)
+
+Plot_Outcome.1 <- Pre.lm_full %>% mutate(tidied = map(lm_out_full,conf.int = TRUE, tidy)) %>% 
+  unnest(tidied) %>% select(-data, -lm_out_full) %>% filter(term == "Measure") %>%  mutate_if(is.character,as.factor) %>% arrange(pval_full) 
+
+Plot_Outcome.1 %<>% mutate(sig_value=round(p.value,3))
+
+png("../Figures_Inegration/Forest_Plots/Outcome_Gluc_Lact.png",   height=2, width=5, units="in", res=600)
+
+Plot_Outcome.1  %>% 
+  ggplot(aes(x= estimate , y= fct_reorder(Metabolite,-sig_value), xmin=conf.low, xmax=conf.high, label = sig_value)) +
+  geom_text(nudge_x = 0.0, nudge_y = 0.4, size=5,color = "black") +
+  geom_pointrange()+ # Makes range for ggplot values based on the data and AES specified in first line
+  geom_errorbar(aes(xmin=conf.low, xmax=conf.high), width=0, cex=0.7)+ # Makes whiskers on the range (more aesthetically)
+  geom_point(shape = 10, size = 2.5) + # specifies the size and shape of the geompoint
+  geom_vline(xintercept = 0, color = "red", linetype = "dashed", cex = 1, alpha = 0.5) +
+  ggtitle("SCENITH Clinical Outcome Linear Regression")+ # Blank Title for the Graph
+  xlab(" (95% CI)") + 
+  ylab("Cell Type") + facet_wrap(~DC_Type)+
+   theme(aspect.ratio = 1/2,
+        plot.title = element_text(size = 14, face = "bold"),
+        line = element_line(colour = "black", size = 2), # My personal theme for GGplots
+        strip.background = element_rect(fill=NA), 
+        legend.position ="none", 
+        axis.line.x = element_line(colour = "black"), 
+        axis.line.y = element_blank(), 
+        panel.border= element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        panel.background = element_blank(),
+        axis.text.y = element_text(face="plain", color="black",size=14),  # to label y-axis tics/number labels
+        axis.text.x = element_text(face="plain", color="black",size=14),  # to label y-axis tics/number labels
+        axis.title.x = element_text(face="plain", color="black",size=12, angle = 0,vjust = 0),
+        axis.title.y = element_text(face="plain", color="black",size=14,vjust = 0),                                    
+        axis.ticks = element_blank())
+dev.off() 
+
+# no correlation between CD8 T cell responses 
+scMEP_VLG_SC_Seahorse_Tidy.model.Tcells <- scMEP_VLG_SC_Seahorse %>%  
+  filter(!is.na(CD8.CD4_Resp_Per_Patient)) %>% 
+  mutate(Glucose = log10(Glucose),
+         Lactate = log10(Lactate)) %>% 
+  gather(Metabolite, Measure, Glucose:Lactate) %>%  
+  mutate(CD8.1_Rank = case_when(
+  CD8.CD4_Resp_Per_Patient %in% c("Yes") ~ 1,
+  CD8.CD4_Resp_Per_Patient %in% c("No") ~ 0))
+
+scMEP_VLG_SC_Seahorse_Tidy.model.Tcells %>% pull(CD8.1_Rank, DC_Type)
+scMEP_VLG_SC_Seahorse_Tidy.model.Tcells$Measure
+
+Pre.lm_full <- scMEP_VLG_SC_Seahorse_Tidy.model.Tcells %>% nest(data=c(-Metabolite)) %>%  
+  #filter(Cell.Type != "CD8:Treg Ratio") %>% 
+	mutate(
+		lm_out_full = map(data, ~lm(CD8.1_Rank ~ Measure, data=.x %>% filter(!is.na(CD8.1_Rank)) %>% mutate(CD8.1_Rank=as.numeric(CD8.1_Rank)))),
+		pval_full = map_dbl(lm_out_full, ~.x %>% broom::tidy() %>% filter(term=="Measure") %>% pull(p.value)),
+	)
+
+Pre.lm_full %>% select(-data, -lm_out_full) %>% arrange(pval_full)
+
+Plot_Outcome.1 <- Pre.lm_full %>% mutate(tidied = map(lm_out_full,conf.int = TRUE, tidy)) %>% 
+  unnest(tidied) %>% select(-data, -lm_out_full) %>% filter(term == "Measure") %>%  mutate_if(is.character,as.factor) %>% arrange(pval_full) 
+
+Plot_Outcome.1 %<>% mutate(sig_value=round(p.value,3))
+
+png("../09-021_SC_mDC_Figures/Forest_SCENITH_Outcome.png",
+     height=3, width=8, units="in", res=600)
+Plot_Outcome.1  %>% 
+  ggplot(aes(x= estimate , y= fct_reorder(Metabolite,-sig_value), xmin=conf.low, xmax=conf.high, label = sig_value)) +
+  geom_text(nudge_x = 0.0, nudge_y = 0.4, size=5,color = "black") +
+  geom_pointrange()+ # Makes range for ggplot values based on the data and AES specified in first line
+  geom_errorbar(aes(xmin=conf.low, xmax=conf.high), width=0, cex=0.7)+ # Makes whiskers on the range (more aesthetically)
+  geom_point(shape = 10, size = 2.5) + # specifies the size and shape of the geompoint
+  geom_vline(xintercept = 0, color = "red", linetype = "dashed", cex = 1, alpha = 0.5) +
+  ggtitle("SCENITH Clinical Outcome Linear Regression")+ # Blank Title for the Graph
+  xlab(" (95% CI)") + 
+  ylab("Cell Type") +
+   theme(aspect.ratio = 1/2,
+        plot.title = element_text(size = 14, face = "bold"),
+        line = element_line(colour = "black", size = 2), # My personal theme for GGplots
+        strip.background = element_rect(fill=NA), 
+        legend.position ="none", 
+        axis.line.x = element_line(colour = "black"), 
+        axis.line.y = element_blank(), 
+        panel.border= element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        panel.background = element_blank(),
+        axis.text.y = element_text(face="plain", color="black",size=14),  # to label y-axis tics/number labels
+        axis.text.x = element_text(face="plain", color="black",size=14),  # to label y-axis tics/number labels
+        axis.title.x = element_text(face="plain", color="black",size=12, angle = 0,vjust = 0),
+        axis.title.y = element_text(face="plain", color="black",size=14,vjust = 0),                                    
+        axis.ticks = element_blank())
+dev.off() 
+```
+
+# OS Survival data
+```{r}
+library("survival")
+library("survminer")
+
+mDC_Survival_A <- expr_median_meta %>% filter(DC_Type == "iDC")
+#Determine cut off value for selcting high and low values for metabolic parameters
+res.cut.OS_GS <- surv_cutpoint(mDC_Survival_A, time = "Overal_Survival", event = "death_ind",
+                         variables = c("CytC"))
+# palette = "npg" (nature publishing group), see ?ggpubr::ggpar
+
+png("../Figures_09021_SC_mDC/Survival/Cutoff_SCENITH_Glucose_Dep.png",height=5, width=6, units="in", res=600)
+plot(res.cut.OS_GS, c("CytC"), palette = "npg")
+dev.off() 
+
+res.cat.OS_GS <- surv_categorize(res.cut.OS_GS)
+summary(res.cat.OS_GS)
+
+# gsurvplot(fit, data = res.cat, risk.table = TRUE, conf.int = TRUE)
+fit_Lac <- survfit(Surv(Overal_Survival, death_ind) ~ CytC, data = res.cat.OS_GS)
+
+png("../Figures_09021_SC_mDC/Survival/Survival_SCENITH_Glucose_Dep.png",height=6.25, width=4.25, units="in", res=600)
+ggsurvplot(fit_Lac, data = res.cat.OS_GS,
+           title = "Survival Curves",
+           pval = TRUE, pval.method = TRUE,    # Add p-value &  method name
+           surv.median.line = "hv",            # Add median survival lines
+           legend.title = "Glucose Dependence",  # Change legend titles
+           legend.labs = c("High", "Low"),  # Change legend labels
+           palette = "npg",                    # Use JCO journal color palette
+           risk.table = TRUE,                  # Add No at risk table
+           cumevents = TRUE,                   # Add cumulative No of events table
+           tables.height = 0.2,               # Specify tables height
+           tables.theme = theme_cleantable(),  # Clean theme for tables
+           tables.y.text = FALSE               # Hide tables y axis text
+)
+dev.off() 
+```
+
+# Cox OS & PFS Regression Metabolism mDC
+```{r Cox regression hazard risk ratio analysis}
+# Cox regression hazard risk ratio analysis
+##############
+##############
+
+##############
+##############
+# Here I Log10 transform values for Metabolic Parameters
+
+scMEP_VLG_SC_Sea.Tidy.model <- scMEP_VLG_SC_Seahorse %>%  
+  mutate(Glucose = log10(Glucose),
+         Lactate = log10(Lactate)) %>% 
+    gather(Metabolite, Measure, Glucose:Lactate) %>%  
+    group_by(Metabolite, DC_Type) %>% 
+    nest() 
+  
+Model_Cox_OS <- scMEP_VLG_SC_Sea.Tidy.model %>% 
+  mutate(model = map(data, ~ coxph(Surv(Overal_Survival, death_ind) ~ Measure, data = .x)))
+
+Unnest_Model_Cox_OS <- Model_Cox_OS %>% 
+  mutate(coef = map(model, ~tidy(.x,conf.int = TRUE))) %>% 
+  unnest(coef) 
+####
+# Round p.values to 3 Sig figs
+Unnest_Model_Cox_OS <- Unnest_Model_Cox_OS %>% 
+  mutate(sig_value=round(p.value,3))
+
+
+png("../Figures_Inegration/Forest_Plots/COX_OS_Metabolites_iDC.png",
+     height=2, width=8, units="in", res=600)
+Unnest_Model_Cox_OS %>% filter(DC_Type %in% c("iDC")) %>% 
+  ggplot(aes(x= estimate , y= fct_reorder(Metabolite,-sig_value), xmin=conf.low, xmax=conf.high, label = sig_value)) +
+  geom_text(nudge_x = 0.0, nudge_y = 0.4, size=5,color = "black") +
+  geom_pointrange()+ # Makes range for ggplot values based on the data and AES specified in first line
+  geom_errorbar(aes(xmin=conf.low, xmax=conf.high), width=0, cex=0.7)+ # Makes whiskers on the range (more aesthetically pleasing)
+  #coord_flip() + # flip coordinates (puts labels on y axis)
+  geom_point(shape = 10, size = 2.5) + # specifies the size and shape of the geompoint
+  geom_vline(xintercept = 0, color = "red", linetype = "dashed", cex = 1, alpha = 0.5) +
+  ggtitle("OS Metabolite COX Regression")+ # Blank Title for the Graph
+  xlab(" (95% CI)") + 
+  ylab("Metabolite mDC Sups") +
+   theme(aspect.ratio = 1/2,
+        plot.title = element_text(size = 14, face = "bold"),
+        line = element_line(colour = "black", size = 2), # My personal theme for GGplots
+        strip.background = element_rect(fill=NA), 
+        legend.position ="none", 
+        axis.line.x = element_line(colour = "black"), 
+        axis.line.y = element_blank(), 
+        panel.border= element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        panel.background = element_blank(),
+        axis.text.y = element_text(face="plain", color="black",size=14),  # to label y-axis tics/number labels
+        axis.text.x = element_text(face="plain", color="black",size=14),  # to label y-axis tics/number labels
+        axis.title.x = element_text(face="plain", color="black",size=12, angle = 0,vjust = 0),
+        axis.title.y = element_text(face="plain", color="black",size=14,vjust = 0),                                    
+        axis.ticks = element_blank())
+dev.off() 
+# dev.off() 
+##############
+
+Model_Cox_PFS <- scMEP_VLG_SC_Sea.Tidy.model %>% 
+  mutate(model = map(data, ~ coxph(Surv(PF_Survival, PFS_ind) ~ Measure, data = .x)))
+
+Unnest_Model_Cox_PFS <- Model_Cox_PFS %>% 
+  mutate(coef = map(model, ~tidy(.x,conf.int = TRUE))) %>% 
+  unnest(coef) 
+
+####
+# Round p.values to 3 Sig figs
+Unnest_Model_Cox_PFS <- Unnest_Model_Cox_PFS %>% 
+  mutate(sig_value=round(p.value,3))
+
+png("../Figures_Inegration/Forest_Plots/COX_PFS_Metabolites_iDC.png",
+     height=2, width=8, units="in", res=600)
+Unnest_Model_Cox_PFS %>% filter(DC_Type %in% c("iDC")) %>% 
+  ggplot(aes(x= estimate , y= fct_reorder(Metabolite,-sig_value), xmin=conf.low, xmax=conf.high, label = sig_value)) +
+  geom_text(nudge_x = 0.0, nudge_y = 0.4, size=5,color = "black") +
+  geom_pointrange()+ # Makes range for ggplot values based on the data and AES specified in first line
+  geom_errorbar(aes(xmin=conf.low, xmax=conf.high), width=0, cex=0.7)+ # Makes whiskers on the range (more aesthetically pleasing)
+  #coord_flip() + # flip coordinates (puts labels on y axis)
+  geom_point(shape = 10, size = 2.5) + # specifies the size and shape of the geompoint
+  geom_vline(xintercept = 0, color = "red", linetype = "dashed", cex = 1, alpha = 0.5) +
+  ggtitle("PFS Metabolite COX Regression")+ # Blank Title for the Graph
+  xlab(" (95% CI)") + 
+  ylab("Metabolite mDC Sups") +
+   theme(aspect.ratio = 1/2,
+        plot.title = element_text(size = 14, face = "bold"),
+        line = element_line(colour = "black", size = 2), # My personal theme for GGplots
+        strip.background = element_rect(fill=NA), 
+        legend.position ="none", 
+        axis.line.x = element_line(colour = "black"), 
+        axis.line.y = element_blank(), 
+        panel.border= element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        panel.background = element_blank(),
+        axis.text.y = element_text(face="plain", color="black",size=14),  # to label y-axis tics/number labels
+        axis.text.x = element_text(face="plain", color="black",size=14),  # to label y-axis tics/number labels
+        axis.title.x = element_text(face="plain", color="black",size=12, angle = 0,vjust = 0),
+        axis.title.y = element_text(face="plain", color="black",size=14,vjust = 0),                                    
+        axis.ticks = element_blank())
+dev.off()
+##############
+```
+
+#1. OS Survival data iDC
+```{r}
+library("survival")
+library("survminer")
+scMEP_VLG_SC_Seahorse$DC_Type
+scMEP_iDC_selected <- scMEP_VLG_SC_Seahorse %>% filter(DC_Type == "iDC")
+#Determine cut off value for selcting high and low values for metabolic parameters
+Lactate.res.cut.OS_iDC <- surv_cutpoint(scMEP_iDC_selected, time = "Overal_Survival", event = "death_ind",
+                         variables = c("Glucose","Lactate"))
+# palette = "npg" (nature publishing group), see ?ggpubr::ggpar
+
+png("../Figures_Inegration/Lact_Gluc/Cutoff_Lactate_iDC.png",height=4, width=5, units="in", res=600)
+plot(Lactate.res.cut.OS_iDC, c("Lactate"), palette = "npg")
+dev.off() 
+
+Lactate_res.cat.OS_iDC <- surv_categorize(Lactate.res.cut.OS_iDC)
+summary(Lactate_res.cat.OS_iDC)
+
+# gsurvplot(fit, data = res.cat, risk.table = TRUE, conf.int = TRUE)
+fit1 <- survfit(Surv(Overal_Survival, death_ind) ~Lactate, data = Lactate_res.cat.OS_iDC)
+
+png("../Figures_Inegration/Lact_Gluc/Survival_Lactate_iDC.png",height=6.25, width=4.25, units="in", res=600)
+ggsurvplot(fit1, data = Lactate_res.cat.OS_iDC,
+           title = "Survival Curves",
+           pval = TRUE, pval.method = TRUE,    # Add p-value &  method name
+           surv.median.line = "hv",            # Add median survival lines
+           legend.title = "Lactate Levels",  # Change legend titles
+           legend.labs = c("High", "Low"),  # Change legend labels
+           palette = "npg",                    # Use JCO journal color palette
+           risk.table = TRUE,                  # Add No at risk table
+           cumevents = TRUE,                   # Add cumulative No of events table
+           tables.height = 0.2,               # Specify tables height
+           tables.theme = theme_cleantable(),  # Clean theme for tables
+           tables.y.text = FALSE               # Hide tables y axis text
+)
+dev.off() 
+```
+#1. PFS Survival data iDC
+```{r}
+Lactate.res.cut.PFS_iDC <- surv_cutpoint(scMEP_iDC_selected, time = "PF_Survival", event = "prog_ind",
+                         variables = c("Glucose","Lactate"))
+# palette = "npg" (nature publishing group), see ?ggpubr::ggpar
+
+png("../Figures_Inegration/Lact_Gluc/Cutoff_Lactate_PFS_iDC.png",height=4, width=5, units="in", res=600)
+plot(Lactate.res.cut.PFS_iDC, c("Glucose"), palette = "npg")
+dev.off() 
+
+Lactate_res.cat.PFS_iDC <- surv_categorize(Lactate.res.cut.PFS_iDC)
+summary(Lactate_res.cat.PFS_iDC)
+
+# gsurvplot(fit, data = res.cat, risk.table = TRUE, conf.int = TRUE)
+fit_PFS <- survfit(Surv(PF_Survival, prog_ind) ~Glucose, data = Lactate_res.cat.PFS_iDC)
+
+png("../Figures_Inegration/Lact_Gluc/Survival_Lactate_PFS_iDC.png",height=6.25, width=4.25, units="in", res=600)
+ggsurvplot(fit_PFS, data = Lactate_res.cat.PFS_iDC,
+           title = "Survival Curves",
+           pval = TRUE, pval.method = TRUE,    # Add p-value &  method name
+           surv.median.line = "hv",            # Add median survival lines
+           legend.title = "Lactate Levels",  # Change legend titles
+           legend.labs = c("High", "Low"),  # Change legend labels
+           palette = "npg",                    # Use JCO journal color palette
+           risk.table = TRUE,                  # Add No at risk table
+           cumevents = TRUE,                   # Add cumulative No of events table
+           tables.height = 0.2,               # Specify tables height
+           tables.theme = theme_cleantable(),  # Clean theme for tables
+           tables.y.text = FALSE               # Hide tables y axis text
+)
+dev.off() 
+```
+
+
+# ----------------------------
+# ----------------------------
+
+```{r}
+jitter_none <- position_jitter(width = 0, height = 0)
+```
+
+# OUCTOME METABOLIC ASSAYS
+# Correlations Set 1
+```{r}
+A_Parameters <- scMEP_VLG_SC_Seahorse %>% mutate_at(vars(SCENITH_Parameters), ~ normalize(.)) %>% 
+  gather(Metabolism, Measure , all_of(SCENITH_Parameters))
+scMEP_VLG_SC_Seahorse_scMEP_Marks <- scMEP_VLG_SC_Seahorse %>% gather(scMEP_marker, Measure ,CytC:CD1c)
+B_Parameters <- scMEP_VLG_SC_Seahorse %>% mutate_at(vars(Seahorse_OXPHOS,Seahorse_FAO,Seahorse_Glycolysis), ~ normalize(.)) %>% 
+  gather(Metabolism, Measure , all_of(Seahorse_OXPHOS),all_of(Seahorse_FAO),all_of(Seahorse_Glycolysis))
+```
+
+# CORR SCENITH vs Seahorse
+```{r}
+png("../Figures_Inegration/Seahorse_SCENITH_A.png", height=2, width=20, units="in", res=600)
+A_Parameters %>% filter(DC_Type == "mDC") %>%
+  ggplot(aes(x = normalize(`Glycolytic capacity`), y = Measure)) +
+  geom_jitter(aes(color = Response),position = jitter_none, size = 2, alpha = 0.75)+
+     geom_smooth(method = "lm", se=T, color = "black", alpha= 0.25) +
+  stat_cor(method = "spearman", label.x = 0, label.y = 1, size=3)+
+    scale_color_manual(values = c(cols.Response.assign))+
+        scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  theme_bw() + xlab("Glycolytic capacity") + ylab("SCENITH Parameters")+
+  facet_wrap(~Metabolism, scales = "free", nrow = 1)+
+        labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/1,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+
+png("../Figures_Inegration/Seahorse_SCENITH_B.png", height=2, width=20, units="in", res=600)
+A_Parameters %>% filter(DC_Type == "mDC") %>% 
+  ggplot(aes(x = normalize(`Basal glycolysis`), y = Measure)) +
+  geom_jitter(aes(color = Response),position = jitter_none, size = 2, alpha = 0.75)+
+     geom_smooth(method = "lm", se=T, color = "black", alpha= 0.25) +
+  stat_cor(method = "spearman", label.x = 0, label.y = 1, size=3)+
+    scale_color_manual(values = c(cols.Response.assign))+
+        scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  theme_bw() + xlab("Basal glycolysis") + ylab("SCENITH Parameters")+
+  facet_wrap(~Metabolism, scales = "free", nrow = 1)+
+        labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/1,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+
+png("../Figures_Inegration/Seahorse_SCENITH_C.png", height=2, width=20, units="in", res=600)
+A_Parameters %>% filter(DC_Type == "mDC") %>% 
+  ggplot(aes(x = normalize(`Maximal oxygen consumption`), y = Measure)) +
+  geom_jitter(aes(color = Response),position = jitter_none, size = 2, alpha = 0.75)+
+     geom_smooth(method = "lm", se=T, color = "black", alpha= 0.25) +
+  stat_cor(method = "spearman", label.x = 0, label.y = 1, size=3)+
+    scale_color_manual(values = c(cols.Response.assign))+
+        scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  theme_bw() + xlab("Maximal oxygen consumption") + ylab("SCENITH Parameters")+
+  facet_wrap(~Metabolism, scales = "free", nrow = 1)+
+        labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/1,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+
+png("../Figures_Inegration/Seahorse_SCENITH_D.png", height=2, width=20, units="in", res=600)
+A_Parameters %>% filter(DC_Type == "mDC") %>% 
+    ggplot(aes(x = normalize(`Basal respiration`), Measure)) +
+  geom_jitter(aes(color = Response),position = jitter_none, size = 2, alpha = 0.75)+
+     geom_smooth(method = "lm", se=T, color = "black", alpha= 0.25) +
+  stat_cor(method = "spearman", label.x = 0, label.y = 1, size=3)+
+    scale_color_manual(values = c(cols.Response.assign))+
+        scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  theme_bw() + xlab("Basal respiration") + ylab("SCENITH Parameters")+
+  facet_wrap(~Metabolism, scales = "free", nrow = 1)+
+        labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/1,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+```
+
+# CORR scMEP vs Seahorse
+```{r}
+png("../Figures_Inegration/scMEP_Marker_OXPHOS_OCR.png", height=2.1, width=20, units="in", res=600)
+scMEP_VLG_SC_Seahorse_scMEP_Marks %>% 
+  #filter(DC_Type == "mDC") %>% 
+  filter(scMEP_marker %in% c(ETC_TCA)) %>% 
+  ggplot(aes(x = normalize(`Maximal oxygen consumption`), y =  normalize(Measure))) +
+     geom_smooth(method = "lm", se=T, color = "black", alpha= 0.25) +
+  geom_jitter(aes(color = Response),position = jitter_none, size = 2, alpha = 0.75)+
+  stat_cor(method = "spearman", label.y = 1, size=3)+
+    scale_color_manual(values = c(cols.Response.assign))+
+      scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  theme_bw() + xlab("Maximal oxygen consumption") + ylab("ETC_TCA")+
+  facet_wrap(~scMEP_marker, scales = "free", nrow = 1)+
+        labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/1,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 16, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+
+png("../Figures_Inegration/scMEP_Marker_OXPHOS_Mito_Dep.png", height=2, width=20, units="in", res=600)
+scMEP_VLG_SC_Seahorse_scMEP_Marks %>% 
+  filter(DC_Type == "mDC") %>% 
+  filter(scMEP_marker %in% c(ETC_TCA)) %>% 
+  ggplot(aes(x = normalize(Mito_Dep), y =  normalize(Measure))) +
+     geom_smooth(method = "lm", se=T, color = "black", alpha= 0.25) +
+  geom_jitter(aes(color = Response),position = jitter_none, size = 2, alpha = 0.75)+
+  stat_cor(method = "spearman", label.y = 1, size=3)+
+    scale_color_manual(values = c(cols.Response.assign))+
+      scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  theme_bw() + xlab("Mito_Dep") + ylab("ETC_TCA")+
+  facet_wrap(~scMEP_marker, scales = "free", nrow = 1)+
+        labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/1,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 16, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+
+
+#######################
+png("../Figures_Inegration/scMEP_Marker_GLYC_ECAR.png", height=2, width=20, units="in", res=600)
+scMEP_VLG_SC_Seahorse_scMEP_Marks %>% 
+  filter(scMEP_marker %in% c(GLYC)) %>% 
+    #filter(DC_Type == "iDC") %>% 
+    ggplot(aes(x = normalize(`Glycolytic capacity`), y =  normalize(Measure))) +
+  geom_jitter(aes(color = Response),position = jitter_none, size = 2, alpha = 0.75)+
+   geom_smooth(method = "lm", se=T, color = "black", alpha= 0.25) +
+  stat_cor(method = "spearman", label.y = 1, size=3)+
+    scale_color_manual(values = c(cols.Response.assign))+
+        scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  theme_bw() + xlab("Glycolytic capacity") + ylab("GLYC")+
+  facet_wrap(~scMEP_marker, scales = "free", nrow = 1)+
+        labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/1,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 16, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+
+png("../Figures_Inegration/scMEP_Marker_GLYC_Glyco_Cap.png", height=2, width=20, units="in", res=600)
+scMEP_VLG_SC_Seahorse_scMEP_Marks %>% 
+  filter(scMEP_marker %in% c(GLYC)) %>% 
+    ggplot(aes(x = normalize(Glyco_Cap), y =  normalize(Measure))) +
+  geom_jitter(aes(color = Response),position = jitter_none, size = 2, alpha = 0.75)+
+   geom_smooth(method = "lm", se=T, color = "black", alpha= 0.25) +
+  stat_cor(method = "spearman", label.y = 1, size=3)+
+    scale_color_manual(values = c(cols.Response.assign))+
+        scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+
+  theme_bw() + xlab("SC Glyco_Cap") + ylab("GLYC")+
+  facet_wrap(~scMEP_marker, scales = "free", nrow = 1)+
+        labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/1,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 16, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+
+# Maximal_Exo_FA
+#######################
+png("../Figures_Inegration/scMEP_Marker_FAO_AA_Maximal_Exo_FA.png", height=2, width=20, units="in", res=600)
+scMEP_VLG_SC_Seahorse_scMEP_Marks %>% 
+  #filter(DC_Type == "DC") %>% 
+  filter(scMEP_marker %in% c(FAO_AA)) %>% 
+      ggplot(aes(x = normalize(Maximal_Exo_FA), y =  normalize(Measure))) +
+     geom_smooth(method = "lm", se=T, color = "black", alpha= 0.25) +
+  geom_jitter(aes(color = Response),position = jitter_none, size = 2, alpha = 0.75)+
+  stat_cor(method = "spearman", label.y = 1, size=3)+
+    scale_color_manual(values = c(cols.Response.assign))+
+    scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+
+  theme_bw() + xlab("Maximal_Exo_FA") + ylab("FAO_AA")+
+  facet_wrap(~scMEP_marker, scales = "free", nrow = 1)+
+        labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/1,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 16, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+
+png("../Figures_Inegration/scMEP_Marker_FAO_AA_Basal_Exo_FA.png", height=2, width=20, units="in", res=600)
+scMEP_VLG_SC_Seahorse_scMEP_Marks %>% 
+  #filter(DC_Type == "DC") %>% 
+  filter(scMEP_marker %in% c(FAO_AA)) %>% 
+      ggplot(aes(x = normalize(Basal_Exo_FA), y =  normalize(Measure))) +
+     geom_smooth(method = "lm", se=T, color = "black", alpha= 0.25) +
+  geom_jitter(aes(color = Response),position = jitter_none, size = 2, alpha = 0.75)+
+  stat_cor(method = "spearman", label.y = 1, size=3)+
+    scale_color_manual(values = c(cols.Response.assign))+
+      scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  theme_bw() + xlab("Basal_Exo_FA") + ylab("FAO_AA")+
+  facet_wrap(~scMEP_marker, scales = "free", nrow = 1)+
+        labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/1,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 16, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+#######################
+
+png("../Figures_Inegration/scMEP_Marker_FAO_Dep.png", height=2, width=20, units="in", res=600)
+scMEP_VLG_SC_Seahorse_scMEP_Marks %>% 
+  #filter(DC_Type == "DC") %>% 
+  filter(scMEP_marker %in% c(FAO_AA)) %>% 
+      ggplot(aes(x = normalize(FAO_Dep), y =  normalize(Measure))) +
+     geom_smooth(method = "lm", se=T, color = "black", alpha= 0.25) +
+  geom_jitter(aes(color = Response),position = jitter_none, size = 2, alpha = 0.75)+
+  stat_cor(method = "spearman", label.y = 1, size=3)+
+    scale_color_manual(values = c(cols.Response.assign))+
+      scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  theme_bw() + xlab("FAO_Dep") + ylab("FAO_AA")+
+  facet_wrap(~scMEP_marker, scales = "free", nrow = 1)+
+        labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/1,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 16, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+
+png("../Figures_Inegration/scMEP_Marker_Glnlysis_Dep.png", height=2, width=20, units="in", res=600)
+scMEP_VLG_SC_Seahorse_scMEP_Marks %>% 
+  #filter(DC_Type == "DC") %>% 
+  filter(scMEP_marker %in% c(FAO_AA)) %>% 
+      ggplot(aes(x = normalize(Glnlysis_Dep), y =  normalize(Measure))) +
+     geom_smooth(method = "lm", se=T, color = "black", alpha= 0.25) +
+  geom_jitter(aes(color = Response),position = jitter_none, size = 2, alpha = 0.75)+
+  stat_cor(method = "spearman", label.y = 1, size=3)+
+    scale_color_manual(values = c(cols.Response.assign))+
+      scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  theme_bw() + xlab("Glnlysis_Dep") + ylab("FAO_AA")+
+  facet_wrap(~scMEP_marker, scales = "free", nrow = 1)+
+        labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/1,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 16, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+```
+
+Seahorse_OXPHOS
+Seahorse_Glycolysis 
+Seahorse_FAO 
+# Set of BOX plots Outcome
+```{r}
+Sea_Parameters_iDC <- scMEP_VLG_SC_Seahorse %>% 
+ filter(DC_Type == "iDC") %>% 
+  mutate_at(vars(Seahorse_OXPHOS,Seahorse_FAO,Seahorse_Glycolysis), ~ normalize(.)) %>% 
+    filter(`Maximal oxygen consumption` < 0.8) %>% 
+  gather(Metabolism, Measure , all_of(Seahorse_OXPHOS),all_of(Seahorse_FAO),all_of(Seahorse_Glycolysis))
+Sea_Parameters$Measure
+
+Sea.tukey.Out_iDC <- make_tukey_test(Sea_Parameters_iDC  %>% 
+  group_by(Metabolism,DC_Type) ,variable = "Measure", grouping_variable = "Outcome")
+
+png("../Figures_Inegration/BOX/Outcome_iDC.Seaorse.OXPHOS.png", height=3, width=8, units="in", res=600)
+Sea_Parameters_iDC %>% filter(!is.na(Outcome)) %>% 
+  filter(Metabolism %in% c(Seahorse_OXPHOS)) %>% 
+  ggplot(aes(x = Outcome, y = Measure)) +
+        geom_boxplot(outlier.colour = NA, col = "grey50", alpha = 0.7) +
+  geom_jitter(position = jitter_0, shape=21,color="black",size = 2, alpha = 0.5,    aes(color=Response,fill=Response))+
+  scale_color_manual(values = c(cols.Response.assign))+
+  scale_fill_manual(values = c(cols.Response.assign))+
+  stat_pvalue_manual(Sea.tukey.Out_iDC %>%  
+                       filter(Metabolism %in% c(Seahorse_OXPHOS)) ,  label = "p.adj", tip.length = 0,
+                     vjust = 0.01,   #y.position = c(380,420,460),
+                     size=3,
+                     hide.ns = FALSE)+
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.15)))+
+  theme_bw() +
+  facet_wrap(~Metabolism, scales = "free", nrow = 1,
+             labeller = label_wrap_gen(width = 10, multi_line = TRUE)) +
+  labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/0.8,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+
+
+png("../Figures_Inegration/BOX/Outcome_iDC.Seaorse.Gly.FAOc.png", height=3, width=8, units="in", res=600)
+Sea_Parameters_iDC %>% filter(!is.na(Outcome)) %>% 
+  filter(Metabolism %in% c(Seahorse_Glycolysis,Seahorse_FAO)) %>% 
+  ggplot(aes(x = Outcome, y = Measure)) +
+        geom_boxplot(outlier.colour = NA, col = "grey50", alpha = 0.7) +
+  geom_jitter(position = jitter_0, shape=21,color="black",size = 2, alpha = 0.5,    aes(color=Response,fill=Response))+
+  scale_color_manual(values = c(cols.Response.assign))+
+  scale_fill_manual(values = c(cols.Response.assign))+
+  stat_pvalue_manual(Sea.tukey.Out_iDC %>%  
+                       filter(Metabolism %in% c(Seahorse_Glycolysis,Seahorse_FAO)) ,  
+                     label = "p.adj", tip.length = 0,
+                     vjust = 0.01,   #y.position = c(380,420,460),
+                     size=3,
+                     hide.ns = FALSE)+
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.15)))+
+  theme_bw() +
+  facet_wrap(~Metabolism, scales = "free", nrow = 1,
+             labeller = label_wrap_gen(width = 10, multi_line = TRUE)) +
+  labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/0.8,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+######################################
+######################################
+Sea_Parameters_mDC <- scMEP_VLG_SC_Seahorse %>% 
+ filter(DC_Type == "mDC") %>% 
+  mutate_at(vars(Seahorse_OXPHOS,Seahorse_FAO,Seahorse_Glycolysis), ~ normalize(.)) %>% 
+    filter(`Maximal oxygen consumption` < 0.8) %>% 
+  gather(Metabolism, Measure , all_of(Seahorse_OXPHOS),all_of(Seahorse_FAO),all_of(Seahorse_Glycolysis))
+Sea_Parameters$Measure
+
+Sea.tukey.Out_mDC <- make_tukey_test(Sea_Parameters_mDC  %>% 
+  group_by(Metabolism,DC_Type) ,variable = "Measure", grouping_variable = "Outcome")
+
+png("../Figures_Inegration/BOX/Outcome_mDC.Seaorse.OXPHOS.png", height=3, width=8, units="in", res=600)
+Sea_Parameters_mDC %>% filter(!is.na(Outcome)) %>% 
+  filter(Metabolism %in% c(Seahorse_OXPHOS)) %>% 
+  ggplot(aes(x = Outcome, y = Measure)) +
+        geom_boxplot(outlier.colour = NA, col = "grey50", alpha = 0.7) +
+  geom_jitter(position = jitter_0, shape=21,color="black",size = 2, alpha = 0.5,    aes(color=Response,fill=Response))+
+  scale_color_manual(values = c(cols.Response.assign))+
+  scale_fill_manual(values = c(cols.Response.assign))+
+  stat_pvalue_manual(Sea.tukey.Out_mDC %>%  
+                       filter(Metabolism %in% c(Seahorse_OXPHOS)) ,  label = "p.adj", tip.length = 0,
+                     vjust = 0.01,   #y.position = c(380,420,460),
+                     size=3,
+                     hide.ns = FALSE)+
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.15)))+
+  theme_bw() +
+  facet_wrap(~Metabolism, scales = "free", nrow = 1,
+             labeller = label_wrap_gen(width = 10, multi_line = TRUE)) +
+  labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/0.8,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+
+# Without HD
+Sea_Parameters_mDC %>% filter(!is.na(Outcome)) %>% filter(Outcome != "HD") %>% 
+  filter(Metabolism %in% c(Seahorse_OXPHOS)) %>% 
+  ggplot(aes(x = Outcome, y = Measure)) +
+        geom_boxplot(outlier.colour = NA, col = "grey50", alpha = 0.7) +
+  geom_jitter(position = jitter_0, shape=21,color="black",size = 2, alpha = 0.5,    aes(color=Response,fill=Response))+
+  scale_color_manual(values = c(cols.Response.assign))+
+  scale_fill_manual(values = c(cols.Response.assign))+
+    stat_compare_means(comparisons = my_comps.Good_Bad, method = "wilcox",tip.length = 0.0) + 
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.15)))+
+  theme_bw() +
+  facet_wrap(~Metabolism, scales = "free", nrow = 1,
+             labeller = label_wrap_gen(width = 10, multi_line = TRUE)) +
+  labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/0.8,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank())
+
+
+png("../Figures_Inegration/BOX/Outcome_mDC.Seaorse.Gly.FAOc.png", height=3, width=8, units="in", res=600)
+Sea_Parameters_mDC %>% filter(!is.na(Outcome)) %>% 
+  filter(Metabolism %in% c(Seahorse_Glycolysis,Seahorse_FAO)) %>% 
+  ggplot(aes(x = Outcome, y = Measure)) +
+        geom_boxplot(outlier.colour = NA, col = "grey50", alpha = 0.7) +
+  geom_jitter(position = jitter_0, shape=21,color="black",size = 2, alpha = 0.5,    aes(color=Response,fill=Response))+
+  scale_color_manual(values = c(cols.Response.assign))+
+  scale_fill_manual(values = c(cols.Response.assign))+
+  stat_pvalue_manual(Sea.tukey.Out_mDC %>%  
+                       filter(Metabolism %in% c(Seahorse_Glycolysis,Seahorse_FAO)) ,  
+                     label = "p.adj", tip.length = 0,
+                     vjust = 0.01,   #y.position = c(380,420,460),
+                     size=3,
+                     hide.ns = FALSE)+
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.15)))+
+  theme_bw() +
+  facet_wrap(~Metabolism, scales = "free", nrow = 1,
+             labeller = label_wrap_gen(width = 10, multi_line = TRUE)) +
+  labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/0.8,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+
+# Without HD
+Sea_Parameters_mDC %>% filter(!is.na(Outcome)) %>% filter(Outcome != "HD") %>% 
+  filter(Metabolism %in% c(Seahorse_Glycolysis,Seahorse_FAO)) %>% 
+  ggplot(aes(x = Outcome, y = Measure)) +
+        geom_boxplot(outlier.colour = NA, col = "grey50", alpha = 0.7) +
+  geom_jitter(position = jitter_0, shape=21,color="black",size = 2, alpha = 0.5,    aes(color=Response,fill=Response))+
+  scale_color_manual(values = c(cols.Response.assign))+
+  scale_fill_manual(values = c(cols.Response.assign))+
+    stat_compare_means(comparisons = my_comps.Good_Bad, method = "wilcox",tip.length = 0.0) + 
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.15)))+
+  theme_bw() +
+  facet_wrap(~Metabolism, scales = "free", nrow = 1,
+             labeller = label_wrap_gen(width = 10, multi_line = TRUE)) +
+  labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/0.8,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank())
+######################################
+```
+# Set of BOX plots Seahorse CD8 T cell responses
+```{r}
+CD8.Res.t_test.Im <- Sea_Parameters_mDC %>% filter(!is.na(CD4_Resp_Per_Patient)) %>% 
+  group_by(Metabolism) %>% 
+  t_test(Measure ~ CD4_Resp_Per_Patient) %>% add_y_position()
+
+png("../Figures_Inegration/BOX/CD4_T_mDC.Seaorse.OXPHOS.png", height=3, width=8, units="in", res=600)
+Sea_Parameters_mDC %>% filter(!is.na(CD4_Resp_Per_Patient)) %>% 
+  filter(Metabolism %in% c(Seahorse_OXPHOS)) %>% 
+  ggplot(aes(x = CD4_Resp_Per_Patient, y = Measure)) +
+        geom_boxplot(outlier.colour = NA, col = "grey50", alpha = 0.7) +
+  geom_jitter(position = jitter_0, shape=21,color="black",size = 2, alpha = 0.5,    aes(color=Response,fill=Response))+
+  scale_color_manual(values = c(cols.Response.assign))+
+  scale_fill_manual(values = c(cols.Response.assign))+
+  stat_pvalue_manual(CD8.Res.t_test.Im %>%  
+                       filter(Metabolism %in% c(Seahorse_OXPHOS)) ,  label = "p", tip.length = 0,
+                     vjust = 0.01,   #y.position = c(380,420,460),
+                     size=3,
+                     hide.ns = FALSE)+
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.15)))+
+  theme_bw() +
+  facet_wrap(~Metabolism, scales = "free", nrow = 1,
+             labeller = label_wrap_gen(width = 10, multi_line = TRUE)) +
+  labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/0.8,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+
+
+png("../Figures_Inegration/BOX/CD4_T_mDC.Seaorse.Gly.FAOc.png", height=3, width=8, units="in", res=600)
+Sea_Parameters_mDC %>% filter(!is.na(CD4_Resp_Per_Patient)) %>% 
+  filter(Metabolism %in% c(Seahorse_Glycolysis,Seahorse_FAO)) %>% 
+  ggplot(aes(x = CD4_Resp_Per_Patient, y = Measure)) +
+        geom_boxplot(outlier.colour = NA, col = "grey50", alpha = 0.7) +
+  geom_jitter(position = jitter_0, shape=21,color="black",size = 2, alpha = 0.5,    aes(color=Response,fill=Response))+
+  scale_color_manual(values = c(cols.Response.assign))+
+  scale_fill_manual(values = c(cols.Response.assign))+
+  stat_pvalue_manual(CD8.Res.t_test.Im %>%  
+                       filter(Metabolism %in% c(Seahorse_Glycolysis,Seahorse_FAO)) ,  label = "p", tip.length = 0,
+                     vjust = 0.01,   #y.position = c(380,420,460),
+                     size=3,
+                     hide.ns = FALSE)+
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.15)))+
+  theme_bw() +
+  facet_wrap(~Metabolism, scales = "free", nrow = 1,
+             labeller = label_wrap_gen(width = 10, multi_line = TRUE)) +
+  labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/0.8,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+######################################
+
+
+```
+
+# Set of BOX plots scMEP CD8 T cell responses
+```{r}
+CD8.Res.t_test.scMEP <- scMEP_VLG_SC_Seahorse_scMEP_Marks %>% filter(!is.na(CD8_Resp_Per_Patient)) %>% 
+  group_by(scMEP_marker) %>% 
+  t_test(Measure ~ CD8_Resp_Per_Patient) %>% add_y_position()
+
+scMEP_VLG_SC_Seahorse_scMEP_Marks$scMEP_marker
+png("../Figures_Inegration/BOX/CD8_T_scMEP_ETC_TCA.png", height=3, width=8, units="in", res=600)
+scMEP_VLG_SC_Seahorse_scMEP_Marks %>% filter(!is.na(CD8_Resp_Per_Patient)) %>% 
+  filter(scMEP_marker %in% c(ETC_TCA)) %>% 
+  ggplot(aes(x = CD8_Resp_Per_Patient, y = Measure)) +
+        geom_boxplot(outlier.colour = NA, col = "grey50", alpha = 0.7) +
+  geom_jitter(position = jitter_0, shape=21,color="black",size = 2, alpha = 0.5,    aes(color=Response,fill=Response))+
+  scale_color_manual(values = c(cols.Response.assign))+
+  scale_fill_manual(values = c(cols.Response.assign))+
+  stat_pvalue_manual(CD8.Res.t_test.scMEP %>%  
+                       filter(scMEP_marker %in% c(ETC_TCA)) ,  label = "p", tip.length = 0,
+                     vjust = 0.01,   #y.position = c(380,420,460),
+                     size=3,
+                     hide.ns = FALSE)+
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.15)))+
+  theme_bw() +
+  facet_wrap(~scMEP_marker, scales = "free", nrow = 1,
+             labeller = label_wrap_gen(width = 10, multi_line = TRUE)) +
+  labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/0.8,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+
+png("../Figures_Inegration/BOX/CD8_T_scMEP_GLYC.png", height=3, width=8, units="in", res=600)
+scMEP_VLG_SC_Seahorse_scMEP_Marks %>% filter(!is.na(CD8_Resp_Per_Patient)) %>% 
+  filter(scMEP_marker %in% c(GLYC)) %>% 
+  ggplot(aes(x = CD8_Resp_Per_Patient, y = Measure)) +
+        geom_boxplot(outlier.colour = NA, col = "grey50", alpha = 0.7) +
+  geom_jitter(position = jitter_0, shape=21,color="black",size = 2, alpha = 0.5,    aes(color=Response,fill=Response))+
+  scale_color_manual(values = c(cols.Response.assign))+
+  scale_fill_manual(values = c(cols.Response.assign))+
+  stat_pvalue_manual(CD8.Res.t_test.scMEP %>%  
+                       filter(scMEP_marker %in% c(GLYC)) ,  label = "p", tip.length = 0,
+                     vjust = 0.01,   #y.position = c(380,420,460),
+                     size=3,
+                     hide.ns = FALSE)+
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.15)))+
+  theme_bw() +
+  facet_wrap(~scMEP_marker, scales = "free", nrow = 1,
+             labeller = label_wrap_gen(width = 10, multi_line = TRUE)) +
+  labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/0.8,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+
+png("../Figures_Inegration/BOX/CD8_T_scMEP_FAO_AA.png", height=3, width=8, units="in", res=600)
+scMEP_VLG_SC_Seahorse_scMEP_Marks %>% filter(!is.na(CD8_Resp_Per_Patient)) %>% 
+  filter(scMEP_marker %in% c(FAO_AA)) %>% 
+  ggplot(aes(x = CD8_Resp_Per_Patient, y = Measure)) +
+        geom_boxplot(outlier.colour = NA, col = "grey50", alpha = 0.7) +
+  geom_jitter(position = jitter_0, shape=21,color="black",size = 2, alpha = 0.5,    aes(color=Response,fill=Response))+
+  scale_color_manual(values = c(cols.Response.assign))+
+  scale_fill_manual(values = c(cols.Response.assign))+
+  stat_pvalue_manual(CD8.Res.t_test.scMEP %>%  
+                       filter(scMEP_marker %in% c(FAO_AA)) ,  label = "p", tip.length = 0,
+                     vjust = 0.01,   #y.position = c(380,420,460),
+                     size=3,
+                     hide.ns = FALSE)+
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.15)))+
+  theme_bw() +
+  facet_wrap(~scMEP_marker, scales = "free", nrow = 1,
+             labeller = label_wrap_gen(width = 10, multi_line = TRUE)) +
+  labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/0.8,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+######################################
+
+
+```
+
+# Set of BOX plots SCENITH CD8 T cell responses
+```{r}
+A_Par_CD8.Res.t_test.Im <- A_Parameters %>% filter(!is.na(CD8_Resp_Per_Patient)) %>% 
+  group_by(Metabolism) %>% 
+  t_test(Measure ~ CD8_Resp_Per_Patient) %>% add_y_position()
+
+
+png("../Figures_Inegration/BOX/CD8_T_mDC.SCENITH.png", height=3, width=8, units="in", res=600)
+A_Parameters %>% filter(!is.na(CD8_Resp_Per_Patient)) %>% 
+  ggplot(aes(x = CD8_Resp_Per_Patient, y = Measure)) +
+        geom_boxplot(outlier.colour = NA, col = "grey50", alpha = 0.7) +
+  geom_jitter(position = jitter_0, shape=21,color="black",size = 2, alpha = 0.5,    aes(color=Response,fill=Response))+
+  scale_color_manual(values = c(cols.Response.assign))+
+  scale_fill_manual(values = c(cols.Response.assign))+
+  stat_pvalue_manual(A_Par_CD8.Res.t_test.Im 
+                       ,  label = "p", tip.length = 0,
+                     vjust = 0.01,   #y.position = c(380,420,460),
+                     size=3,
+                     hide.ns = FALSE)+
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.15)))+
+  theme_bw() +
+  facet_wrap(~Metabolism, scales = "free", nrow = 1,
+             labeller = label_wrap_gen(width = 10, multi_line = TRUE)) +
+  labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/0.8,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 9, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+
+
+A_Par_CD4.Res.t_test.Im <- A_Parameters %>% filter(!is.na(CD4_Resp_Per_Patient)) %>% 
+  group_by(Metabolism) %>% 
+  t_test(Measure ~ CD4_Resp_Per_Patient) %>% add_y_position()
+
+
+png("../Figures_Inegration/BOX/CD4_T_mDC.SCENITH.png", height=3, width=8, units="in", res=600)
+A_Parameters %>% filter(!is.na(CD4_Resp_Per_Patient)) %>% 
+  ggplot(aes(x = CD4_Resp_Per_Patient, y = Measure)) +
+        geom_boxplot(outlier.colour = NA, col = "grey50", alpha = 0.7) +
+  geom_jitter(position = jitter_0, shape=21,color="black",size = 2, alpha = 0.5,    aes(color=Response,fill=Response))+
+  scale_color_manual(values = c(cols.Response.assign))+
+  scale_fill_manual(values = c(cols.Response.assign))+
+  stat_pvalue_manual(A_Par_CD4.Res.t_test.Im 
+                       ,  label = "p", tip.length = 0,
+                     vjust = 0.01,   #y.position = c(380,420,460),
+                     size=3,
+                     hide.ns = FALSE)+
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.15)))+
+  theme_bw() +
+  facet_wrap(~Metabolism, scales = "free", nrow = 1,
+             labeller = label_wrap_gen(width = 10, multi_line = TRUE)) +
+  labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/0.8,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 9, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+######################################
+
+
+```
+
+```{r}
+glimpse(scMEP_VLG_SC_Seahorse)
+png("../Figures_Inegration/Seahorse_SCENITH_A.png", height=2, width=20, units="in", res=600)
+B_Parameters %>% #filter(DC_Type == "mDC") %>%
+  ggplot(aes(x = CD8_iDC_T2_COMBO, y =  Measure)) +
+  geom_jitter(aes(color = Response),position = jitter_none, size = 2, alpha = 0.75)+
+     geom_smooth(method = "lm", se=T, color = "black", alpha= 0.25) +
+  stat_cor(method = "spearman", label.x = 0, label.y = 1, size=3)+
+    scale_color_manual(values = c(cols.Response.assign))+
+        scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  theme_bw() + xlab("Glycolytic capacity") + ylab("SCENITH Parameters")+
+  facet_wrap(~Metabolism, scales = "free", nrow = 4)+
+        labs(colour= "Response",
+       fill= "Response")+
+          theme(aspect.ratio = 1/1,
+            panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10, face ="bold"),
+        strip.background =element_blank())
+dev.off()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
