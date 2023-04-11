@@ -1,0 +1,345 @@
+---
+title: "09-021 Microarray"
+author: "Juraj Adamik"
+date: '2022-09-25'
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+# Load Libraries
+```{r}
+library(oligo)
+library(Biobase)
+library(oligoClasses)
+library(ArrayExpress)
+library(pd.hugene.2.0.st)
+#library(arrayQualityMetrics)
+
+library(limma)
+library(pheatmap)
+library(colorRamps)
+library(colorspace)
+
+library(data.table)
+library(magrittr) # for %<>% function
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+library(stringr)
+#source("/R_work/R_functions.r")
+library(readxl)
+library(viridis)
+library(data.table)
+library(janitor)
+library(ggpubr)
+library(ComplexHeatmap)
+library(circlize) 
+library(rstatix)
+library(gridBase)
+library(randomcoloR)
+library(RColorBrewer)
+library(tidytext)
+library(cowplot)
+library(reshape2)
+library(ggrepel)
+## Load the t-SNE library
+library(Rtsne)
+
+replace_factor_na <- function(x){
+  x <- as.character(x)
+  x <- if_else(is.na(x), "HD", x)
+  x <- as.factor(x)
+}
+
+make_tukey_test <- function (data,variable,grouping_variable){
+  data %>%
+    tukey_hsd(reformulate(grouping_variable, variable)) %>%
+    add_y_position()
+}
+```
+
+```{r}
+normalized_module <- read.table("DCExpression_Normalized_Matrix.txt", row.names = 1, header=TRUE)
+dim(normalized_module) # 34659    99
+```
+
+```{r}
+# this is just an additinal section in case the names in expression set don't match the names in pheno set
+################ I took out the column names to make sure they match the names in pheno data table
+subset <- normalized_module[1,]
+subset
+write.table(subset, file="subset.txt", sep="\t", quote=F, col.names=NA,)
+# after writing out the table I combined it with pheno table names
+head(normalized_module)
+################ 
+```
+
+```{r}
+pheno_data_set <- read.table("DCExpression_PhenoData.txt", row.names = 1, header=TRUE)
+head(pheno_data_set) 
+dim(pheno_data_set) #99 59
+```
+
+```{r}
+# convert pheno_data_set_1 to Annotated data frame format
+pheno_data_set_1 <- AnnotatedDataFrame(pheno_data_set)
+pheno_data_set_1
+
+# convert normalized_module "data frame" in matrix_data "matrix"
+
+matrix_data <- as.matrix(normalized_module)
+colnames(matrix_data)
+## create ExpressionSet object:
+eset_normalied_pat <- new("ExpressionSet", exprs = matrix_data, phenoData = pheno_data_set_1)
+```
+
+```{r}
+# check some characteristics to make sure things match 
+pData(eset_normalied_pat)
+fData(eset_normalied_pat)
+eset_normalied_pat$Cell_Type
+
+# we can see the boxplot of normalized data:
+oligo::boxplot(eset_normalied_pat, target = "core",
+               main = "Boxplot of log2-intensitites for the raw data", cex.axis=0.5, las=2)
+```
+
+```{r}
+########## Filtering based on intensity
+DC_medians <- rowMedians(Biobase::exprs(eset_normalied_pat))
+
+######## Histogram of the median intensities per gene
+hist_res <- hist(DC_medians, 100, col = "cornsilk1", freq = FALSE,
+                 main = "Histogram of the median intensities",
+                 border = "antiquewhite4",
+                 xlab = "Median intensities")
+
+emp_mu <- hist_res$breaks[which.max(hist_res$density)]
+emp_sd <- mad(DC_medians)/2
+prop_cental <- 1
+
+lines(sort(DC_medians), prop_cental*dnorm(sort(DC_medians),
+                                          mean = emp_mu , sd = emp_sd),
+      col = "grey10", lwd = 4)
+
+# We visually set a cutoff line man_threshold to the left of the histogram peak in order not to exclude too many genes.
+man_threshold <- 1.75
+
+hist_res <- hist(DC_medians, 100, col = "cornsilk", freq = FALSE,
+                 main = "Histogram of the median intensities",
+                 border = "antiquewhite4",
+                 xlab = "Median intensities")
+
+abline(v = man_threshold, col = "coral4", lwd = 2)
+
+# Transcripts that do not have intensities larger than the threshold in at least as many arrays as the 
+# smallest experimental group are excluded.
+# In order to do so, we first have to get a list with the number of samples (=arrays) (no_of_samples) 
+# in the experimental groups:
+no_of_samples <-
+  table(paste0(pData(eset_normalied_pat)$Cell_Type, "_",
+               pData(eset_normalied_pat)$Cell_Type))
+#no_of_samples
+
+# We then create a table of idx_man_threshold to summarize the results and get an overview over 
+# how many genes are filtered out.
+samples_cutoff <- min(no_of_samples)
+
+idx_man_threshold <- apply(Biobase::exprs(eset_normalied_pat), 1.75,
+                           function(x){
+                             sum(x > man_threshold) >= samples_cutoff})
+table(idx_man_threshold)
+
+DC_eset<- subset(eset_normalied_pat, idx_man_threshold)
+dim(DC_eset)
+#34049       99
+```
+
+# write.csv
+```{r}
+write.csv(data.frame(fData(DC_eset),exprs(DC_eset)),file="../Microaray_dfs/Expression_for_GSEA_7_26_2019.csv",row.names = T)
+Micro.table <- read_csv("../Microaray_dfs/Expression_for_GSEA_7_26_2019.csv")
+Micro.table %<>% rename("Gene" = "...1")
+#Micro.table %>% column_to_rownames(var = "Gene")
+```
+
+# 1. DEG Analysis
+```{r}
+# create a design matrix based on the sample attributes
+design <- model.matrix(~factor(DC_eset$Cell_Type))
+# print the design matrix
+design
+colnames(design)
+
+samples <- DC_eset$Cell_Type
+samples <- as.factor(samples)
+samples
+design <- model.matrix(~0 + samples)
+design
+colnames(design) <- c("iDC", "mDC", "TMM2")
+design
+# fit the linear model to the filtered expression set
+fit <- lmFit(DC_eset, design)
+# set up a contrast matrix to compare tissues v cell line
+
+contr.matrix <- makeContrasts(mDCvsiDC = mDC-iDC, 
+                              TMM2vsmDC = TMM2-mDC,
+                              TMM2vsiDC = TMM2-iDC,
+                              levels = colnames(design))
+
+```
+
+# 2. DEG Analysis
+```{r}
+# Now the contrast matrix is combined with the per-probeset linear model fit.
+DC_fits <- contrasts.fit(fit, contr.matrix)
+DC_ebFit <- eBayes(DC_fits)
+
+topTable(DC_ebFit, number=10, coef=1)
+topTable(DC_ebFit, number=10, coef=2)
+topTable(DC_ebFit, number=10, coef=3)
+
+nrow(topTable(DC_ebFit, coef=1, number=Inf, lfc=1))
+nrow(topTable(DC_ebFit, coef=2, number=Inf, lfc=1))
+nrow(topTable(DC_ebFit, coef=3, number=Inf, lfc=1))
+
+
+Genes_mDCvsiDC <- (topTable(DC_ebFit, coef=1, lfc=1, number=Inf))
+Genes_mDCvsiDC <- Genes_mDCvsiDC[order(-Genes_mDCvsiDC$logFC), ]
+dim(Genes_mDCvsiDC)
+
+Genes_mDCvsiDC %>% filter(adj.P.Val < 0.05)
+Genes_mDCvsiDC %>%  write.csv("../Microaray_dfs/DE_coef1_GENES_mDCvsiDC.csv",row.names = T)
+
+##### 
+Genes_TMM2vsmDC <- (topTable(DC_ebFit, coef=2, lfc=1, number=Inf))
+Genes_TMM2vsmDC <- Genes_TMM2vsmDC[order(-Genes_TMM2vsmDC$logFC), ]
+head(Genes_TMM2vsmDC)
+dim(Genes_TMM2vsmDC)
+Genes_TMM2vsmDC %>%  write.csv("../Microaray_dfs/DE_coef2_GENES_TMM2vsmDC.csv",row.names = T)
+```
+
+# tSNE analysis based on normalizedExpression Matrix
+```{r}
+#Take out DEG genes for mDCvsiDC DEG_Gene
+mDCvsiDC.genes <- dput(as.character(Genes_mDCvsiDC %>% rownames_to_column(var = "DEG_Gene") %>%  
+  pull(DEG_Gene)))
+#Take out DEG genes for TMM2vsmDC DEG_Gene
+TMM2vsmDC.gene <-  dput(as.character(Genes_TMM2vsmDC %>% rownames_to_column(var = "DEG_Gene") %>%  
+  pull(DEG_Gene)))
+
+DEG_Normalized_Table <- Micro.table %>%  
+  filter(Gene %in% c(mDCvsiDC.genes,TMM2vsmDC.gene))
+
+t_table <- t(Micro.table %>%  column_to_rownames(var = "Gene")) 
+dim(t_table)
+head(t_table)
+
+# Subset samples for running tSNE
+set.seed(123)
+tsne_results <- Rtsne(t_table, perplexity=30, check_duplicates = FALSE) # You can change the value of perplexity and see how the plot changes
+tsne_results
+
+tsne_res <- as.data.frame(tsne_results$Y)
+
+class(t_table)
+ABC <- cbind(tsne_res, pheno_data_set)
+
+ABC %>% ggplot(aes(x = V1, y = V2)) + geom_point(aes(color= Cell_Type))
+```
+
+# ---------------------------
+#1. Outcome Design formulas
+```{r}
+# create a design matrix based on the sample attributes
+design <- model.matrix(~factor(DC_eset$Cell_Type))
+# print the design matrix
+design
+colnames(design)
+
+samples <- DC_eset$Cell_Type
+samples <- as.factor(samples)
+samples
+
+OUTCOME <- as.factor(DC_eset$Outcome_1)
+OUTCOME
+
+z <- factor(paste(OUTCOME, samples, sep = "_"))
+design <- model.matrix(~0+z)
+colnames(design) <- gsub("z", "", colnames(design))
+design
+
+# fit the linear model to the filtered expression set
+fit <- lmFit(DC_eset, design)
+# set up a contrast matrix to compare tissues v cell line
+
+contr.matrix <- makeContrasts(Good_mDCvsGood_iDC = Good_mDC-Good_iDC, 
+                              Good_TMM2vsGood_mDC = Good_TMM2-Good_mDC,
+                              Bad_mDCvsBad_iDC = Bad_mDC-Bad_iDC,
+                              Bad_TMM2vsBad_mDC = Bad_TMM2-Bad_mDC,
+                              Good_iDCsBad_iDC = Good_iDC-Bad_iDC,
+                              Good_mDCvsBad_mDC = Good_mDC-Bad_mDC,
+                              Good_TMM2vsBad_TMM2 = Good_TMM2-Bad_TMM2,
+                              levels = colnames(design))
+```
+
+# 2.
+```{r}
+# Now the contrast matrix is combined with the per-probeset linear model fit.
+DC_fits <- contrasts.fit(fit, contr.matrix)
+DC_ebFit <- eBayes(DC_fits)
+topTable(DC_ebFit, number=10, coef=1)
+topTable(DC_ebFit, number=10, coef=2)
+topTable(DC_ebFit, number=10, coef=3)
+topTable(DC_ebFit, number=10, coef=4)
+topTable(DC_ebFit, number=10, lfc=1, coef=5)
+topTable(DC_ebFit, number=10, lfc=1, coef=6)
+topTable(DC_ebFit, number=10, lfc=1, coef=7)
+DC_ebFit$contrasts
+
+nrow(topTable(DC_ebFit, coef=1, number=Inf, lfc=1))
+nrow(topTable(DC_ebFit, coef=2, number=Inf, lfc=1))
+nrow(topTable(DC_ebFit, coef=3, number=Inf, lfc=1))
+nrow(topTable(DC_ebFit, coef=4, number=Inf, lfc=1))
+nrow(topTable(DC_ebFit, coef=5, number=Inf, lfc=1))
+
+nrow(topTable(DC_ebFit, coef=7, number=Inf, lfc=1))
+
+"Good_mDCvsBad_mDC"
+nrow(topTable(DC_ebFit, coef=6, number=Inf, lfc=0.25))
+
+
+
+
+Bad_mDCvsBad_iDC
+Bad_mDCvsBad_iDC <- (topTable(DC_ebFit, coef=3, number=Inf, lfc=0.75))
+Bad_mDCvsBad_iDC <- Bad_mDCvsBad_iDC[order(-Bad_mDCvsBad_iDC$logFC), ]
+head(Bad_mDCvsBad_iDC)
+dim(Bad_mDCvsBad_iDC)
+
+
+Good_mDCvsGood_iDC <- (topTable(DC_ebFit, coef=1, number=Inf, lfc=0.05))
+Good_mDCvsGood_iDC <- Good_mDCvsGood_iDC[order(-Good_mDCvsGood_iDC$logFC), ]
+head(Good_mDCvsGood_iDC)
+dim(Good_mDCvsGood_iDC)
+
+# Good_iDCsBad_iDC
+Good_iDCsBad_iDC <- (topTable(DC_ebFit, coef=5, number=Inf, lfc=0.1))
+Good_iDCsBad_iDC <- Good_iDCsBad_iDC[order(-Good_iDCsBad_iDC$logFC), ]
+head(Good_iDCsBad_iDC)
+dim(Good_iDCsBad_iDC)
+Good_iDCsBad_iDC %>%  write.csv("../Microaray_dfs/DE_coef5_Good_iDCsBad_iDC.csv",row.names = T)
+
+# Good_mDCvsBad_mDC
+Good_mDCvsBad_mDC <- (topTable(DC_ebFit, coef=6, number=Inf, lfc=0.1))
+Good_mDCvsBad_mDC <- Good_mDCvsBad_mDC[order(-Good_mDCvsBad_mDC$logFC), ]
+head(Good_mDCvsBad_mDC)
+dim(Good_mDCvsBad_mDC)
+Good_mDCvsBad_mDC %>%  write.csv("../Microaray_dfs/DE_coef6_Good_mDCvsBad_mDC.csv",row.names = T)
+
+
+
+```
+
+
+
